@@ -31,6 +31,10 @@ function concat(parts: Uint8Array[]) {
   return out;
 }
 
+function blobPart(bytes: Uint8Array) {
+  return new Uint8Array(bytes).buffer;
+}
+
 function kindOf(bytes: Uint8Array): Kind {
   if (bytes[0] === 0xff && bytes[1] === 0xd8) return "jpeg";
   if (bytes.slice(0, 8).every((value, i) => value === [137, 80, 78, 71, 13, 10, 26, 10][i])) return "png";
@@ -187,7 +191,7 @@ function zipFiles(entries: Array<{ name: string; bytes: Uint8Array }>) {
 export default function Home() {
   const input = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
-  const toastTimer = useRef<number>();
+  const toastTimer = useRef<number | undefined>(undefined);
   const [items, setItems] = useState<FileItem[]>([]);
   const [language, setLanguage] = useState<"en" | "zh">("zh");
   const [tagValue, setTagValue] = useState(DEFAULT_TAG);
@@ -266,9 +270,9 @@ export default function Home() {
   }
   function download(item: FileItem) {
     if (!item.output) return; const extension = item.format === "jpeg" ? "jpg" : "png"; const name = `${item.file.name.replace(/\.[^.]+$/, "")}-synthetic-performer.${extension}`;
-    const url = URL.createObjectURL(new Blob([item.output], { type: item.format === "jpeg" ? "image/jpeg" : "image/png" })); const link = document.createElement("a"); link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
+    const url = URL.createObjectURL(new Blob([blobPart(item.output)], { type: item.format === "jpeg" ? "image/jpeg" : "image/png" })); const link = document.createElement("a"); link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
   }
-  function downloadZip() { const files = items.filter((item): item is FileItem & { output: Uint8Array } => Boolean(item.output)); if (!files.length) return; const names = new Map<string, number>(); const zip = zipFiles(files.map(item => { const base = `${item.file.name.replace(/\.[^.]+$/, "")}-synthetic-performer.${item.format === "jpeg" ? "jpg" : "png"}`; const count = names.get(base) ?? 0; names.set(base, count + 1); return { name: count ? base.replace(/(\.[^.]+)$/, `-${count + 1}$1`) : base, bytes: item.output }; })); const url = URL.createObjectURL(new Blob([zip], { type: "application/zip" })); const link = document.createElement("a"); link.href = url; link.download = "amazon-synthetic-performer-tagged.zip"; link.click(); URL.revokeObjectURL(url); }
+  function downloadZip() { const files = items.filter((item): item is FileItem & { output: Uint8Array } => Boolean(item.output)); if (!files.length) return; const names = new Map<string, number>(); const zip = zipFiles(files.map(item => { const base = `${item.file.name.replace(/\.[^.]+$/, "")}-synthetic-performer.${item.format === "jpeg" ? "jpg" : "png"}`; const count = names.get(base) ?? 0; names.set(base, count + 1); return { name: count ? base.replace(/(\.[^.]+)$/, `-${count + 1}$1`) : base, bytes: item.output }; })); const url = URL.createObjectURL(new Blob([blobPart(zip)], { type: "application/zip" })); const link = document.createElement("a"); link.href = url; link.download = "amazon-synthetic-performer-tagged.zip"; link.click(); URL.revokeObjectURL(url); }
   const statusLabel = (status: FileStatus) => ({ ready: t("Ready", "待处理"), already: t("Already tagged", "已存在标签"), unsupported: t("Unsupported", "不支持"), protected: t("Protected XMP", "受保护的 XMP"), done: t("Verified", "已验证"), error: t("Error", "错误") })[status];
   const fileDetail = (item: FileItem) => ({ ready: t("Ready to add the Amazon tag", "待写入 Amazon 标签"), already: t("Amazon tag already found", "已检测到 Amazon 标签"), unsupported: t("This format is not supported", "不支持此文件格式"), protected: t("Compressed PNG XMP is not changed", "不会修改压缩 PNG XMP"), done: t("Tag written and read back successfully", "标签写入后已成功读回验证"), error: t("File could not be read. Choose it again.", "无法读取文件，请重新选择。") })[item.status];
 
