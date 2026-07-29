@@ -15,12 +15,12 @@ type FileItem = { id: string; file: File; bytes: Uint8Array; format: Kind; locat
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const structuredData = JSON.stringify({ "@context": "https://schema.org", "@graph": [
-  { "@type": "SoftwareApplication", name: "Amazon AI Image Tagger", applicationCategory: "BusinessApplication", operatingSystem: "Web", browserRequirements: "Requires JavaScript. Supports JPG and PNG files.", description: "A browser-only tool that checks or adds Amazon's contains-synthetic-performer XMP tag to eligible product listing and A+ images.", offers: { "@type": "Offer", price: "0", priceCurrency: "USD" }, isAccessibleForFree: true },
+  { "@type": "SoftwareApplication", name: "亚马逊 AI 图片合规标记工具", applicationCategory: "BusinessApplication", operatingSystem: "Web", browserRequirements: "需要 JavaScript，支持 JPG 与 PNG 文件。", description: "面向 Amazon 卖家的浏览器本地工具，可检测或写入适用图片的 contains-synthetic-performer XMP 标记。", offers: { "@type": "Offer", price: "0", priceCurrency: "USD" }, isAccessibleForFree: true },
   { "@type": "FAQPage", mainEntity: [
-    { "@type": "Question", name: "Does every AI-generated Amazon image need this metadata tag?", acceptedAnswer: { "@type": "Answer", text: "No. Amazon's stated condition is a photorealistic person generated entirely by AI. Images with no person, non-photorealistic people, or real people edited with AI do not fall within that condition." } },
-    { "@type": "Question", name: "Will the tag appear on the visible image?", acceptedAnswer: { "@type": "Answer", text: "No. It is XMP metadata inside the file. The tool does not draw a label, watermark, or text onto image pixels." } },
-    { "@type": "Question", name: "Does the tool change image quality or dimensions?", acceptedAnswer: { "@type": "Answer", text: "No pixels are decoded and re-encoded. JPG XMP APP1 and PNG XMP iTXt metadata are updated while visual image data is left intact." } },
-    { "@type": "Question", name: "Can the tool decide whether my image is covered by Amazon's rule?", acceptedAnswer: { "@type": "Answer", text: "No. It only checks and writes the exact XMP value. You remain responsible for applying Amazon's current policy to the final image." } }
+    { "@type": "Question", name: "每张 AI 生成的 Amazon 图片都需要这个标签吗？", acceptedAnswer: { "@type": "Answer", text: "不是。Amazon 的适用条件是逼真且完全由 AI 生成人物。没有人物、非写实人物，或经 AI 修改的真实人物，通常不属于该条件。" } },
+    { "@type": "Question", name: "标签会显示在图片画面中吗？", acceptedAnswer: { "@type": "Answer", text: "不会。它是文件内的 XMP 元数据；本工具不会向图片像素添加标签、水印或文字。" } },
+    { "@type": "Question", name: "工具会影响画质或尺寸吗？", acceptedAnswer: { "@type": "Answer", text: "不会重新编码图片像素；只会更新 JPG 的 XMP APP1 或 PNG 的 XMP iTXt 元数据。" } },
+    { "@type": "Question", name: "工具能判断图片是否适用 Amazon 的规则吗？", acceptedAnswer: { "@type": "Answer", text: "不能。工具只负责检测和写入 XMP 值；卖家仍需根据 Amazon 的最新规则判断最终图片是否适用。" } }
   ] }
 ] });
 
@@ -189,7 +189,7 @@ export default function Home() {
   const folderInput = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number>();
   const [items, setItems] = useState<FileItem[]>([]);
-  const [language, setLanguage] = useState<"en" | "zh">("en");
+  const [language, setLanguage] = useState<"en" | "zh">("zh");
   const [tagValue, setTagValue] = useState(DEFAULT_TAG);
   const [preserveExisting, setPreserveExisting] = useState(true);
   const [toast, setToast] = useState<string>();
