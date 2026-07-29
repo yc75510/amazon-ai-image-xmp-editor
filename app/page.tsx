@@ -13,17 +13,15 @@ type Result = { kind: "neutral" | "success" | "warning" | "error"; title: string
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const structuredData = JSON.stringify({
-  "@context": "https://schema.org",
-  "@type": "WebApplication",
-  name: "Synthetic Performer XMP Tag Tool",
-  applicationCategory: "BusinessApplication",
-  operatingSystem: "Any",
-  browserRequirements: "Requires JavaScript. Supports JPEG and PNG files.",
-  description: "A browser-only tool that checks or adds the contains-synthetic-performer XMP disclosure tag for eligible Amazon seller media.",
-  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-  isAccessibleForFree: true,
-});
+const structuredData = JSON.stringify({ "@context": "https://schema.org", "@graph": [
+  { "@type": "SoftwareApplication", name: "Amazon AI Image Tagger", applicationCategory: "BusinessApplication", operatingSystem: "Web", browserRequirements: "Requires JavaScript. Supports JPG and PNG files.", description: "A browser-only tool that checks or adds Amazon's contains-synthetic-performer XMP tag to eligible product listing and A+ images.", offers: { "@type": "Offer", price: "0", priceCurrency: "USD" }, isAccessibleForFree: true },
+  { "@type": "FAQPage", mainEntity: [
+    { "@type": "Question", name: "Does every AI-generated Amazon image need this metadata tag?", acceptedAnswer: { "@type": "Answer", text: "No. Amazon's stated condition is a photorealistic person generated entirely by AI. Images with no person, non-photorealistic people, or real people edited with AI do not fall within that condition." } },
+    { "@type": "Question", name: "Will the tag appear on the visible image?", acceptedAnswer: { "@type": "Answer", text: "No. It is XMP metadata inside the file. The tool does not draw a label, watermark, or text onto image pixels." } },
+    { "@type": "Question", name: "Does the tool change image quality or dimensions?", acceptedAnswer: { "@type": "Answer", text: "No pixels are decoded and re-encoded. JPG XMP APP1 and PNG XMP iTXt metadata are updated while visual image data is left intact." } },
+    { "@type": "Question", name: "Can the tool decide whether my image is covered by Amazon's rule?", acceptedAnswer: { "@type": "Answer", text: "No. It only checks and writes the exact XMP value. You remain responsible for applying Amazon's current policy to the final image." } }
+  ] }
+] });
 
 function concat(parts: Uint8Array[]) {
   const out = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
@@ -158,7 +156,7 @@ export default function Home() {
   const [bytes, setBytes] = useState<Uint8Array>();
   const [kind, setKind] = useState<Kind>("unsupported");
   const [location, setLocation] = useState<XmpLocation>();
-  const [result, setResult] = useState<Result>({ kind: "neutral", title: "等待文件", detail: "选择 JPEG 或 PNG 文件开始检测。" });
+  const [result, setResult] = useState<Result>({ kind: "neutral", title: "Ready to check", detail: "Choose a final JPG or PNG image to inspect its XMP metadata." });
 
   async function selectFile(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0];
@@ -166,36 +164,50 @@ export default function Home() {
     const data = new Uint8Array(await selected.arrayBuffer());
     const detected = kindOf(data);
     setFile(selected); setBytes(data); setKind(detected);
-    if (detected === "unsupported") { setLocation(undefined); setResult({ kind: "warning", title: "暂不支持此格式", detail: "此版本可安全读写 JPEG 和 PNG。HEIC、WebP、GIF、AVIF 和视频请使用专业工具处理。" }); return; }
+    if (detected === "unsupported") { setLocation(undefined); setResult({ kind: "warning", title: "This format is not supported", detail: "This focused tool safely reads and writes JPG and PNG only. It does not process video, HEIC, WebP, GIF, or AVIF." }); return; }
     const xmp = detected === "jpeg" ? findJpegXmp(data) : findPngXmp(data);
     setLocation(xmp);
-    if (xmp?.compressed) setResult({ kind: "warning", title: "检测到压缩 XMP", detail: "文件含压缩 PNG XMP，本版本不会改写它，以免破坏原有元数据。" });
-    else if (xmp?.xml.toLowerCase().includes(TAG)) setResult({ kind: "success", title: "已检测到标签", detail: `该文件的 XMP 数据包包含 ${TAG}。` });
-    else setResult({ kind: "warning", title: "未检测到标签", detail: xmp ? "发现 XMP 数据包，但其中没有目标标签。" : "没有发现可读 XMP 数据包；可以添加一个新的数据包。" });
+    if (xmp?.compressed) setResult({ kind: "warning", title: "Compressed PNG XMP found", detail: "This file has compressed PNG XMP. It will not be rewritten, to avoid damaging existing metadata." });
+    else if (xmp?.xml.toLowerCase().includes(TAG)) setResult({ kind: "success", title: "Amazon disclosure tag found", detail: `The XMP packet contains ${TAG}. No duplicate tag is needed.` });
+    else setResult({ kind: "warning", title: "Amazon disclosure tag not found", detail: xmp ? "An XMP packet exists, but it does not contain the required keyword." : "No readable XMP packet was found. A new XMP packet can be added." });
   }
 
   function writeAndDownload() {
     if (!file || !bytes || kind === "unsupported") return;
     try {
-      if (location?.compressed) throw new Error("压缩 PNG XMP 暂不支持安全修改。");
+      if (location?.compressed) throw new Error("Compressed PNG XMP cannot be safely updated by this version.");
       const next = addTag(location?.xml ?? "");
-      if (!next.changed) { setResult({ kind: "success", title: "无需修改", detail: "标签已经存在，不会写入重复值。" }); return; }
+      if (!next.changed) { setResult({ kind: "success", title: "No update needed", detail: "The exact disclosure tag already exists, so no duplicate was written." }); return; }
       const output = replace(bytes, location, kind === "jpeg" ? jpegSegment(next.xml) : pngXmp(next.xml), kind);
       const extension = kind === "jpeg" ? "jpg" : "png";
       const base = file.name.replace(/\.[^.]+$/, "");
       const url = URL.createObjectURL(new Blob([output], { type: kind === "jpeg" ? "image/jpeg" : "image/png" }));
       const link = document.createElement("a"); link.href = url; link.download = `${base}-synthetic-performer.${extension}`; link.click(); URL.revokeObjectURL(url);
-      setResult({ kind: "success", title: "标签已写入并开始下载", detail: "下载后请把新文件重新上传并再次检测；这也是最直接的本地验证方式。" });
-    } catch (error) { setResult({ kind: "error", title: "未修改文件", detail: error instanceof Error ? error.message : "发生未知错误。" }); }
+      setResult({ kind: "success", title: "Tag written — download started", detail: "Re-upload the downloaded file here to confirm the tag, or inspect XMP dc:subject with an independent metadata reader." });
+    } catch (error) { setResult({ kind: "error", title: "File was not changed", detail: error instanceof Error ? error.message : "An unexpected error occurred." }); }
   }
 
   return <main>
-    <header className="nav"><a href="#tool" className="brand">XMP <span>Disclosure</span></a><nav><a href="#guide">使用说明</a><a href="#sources">来源</a><a href="#faq">FAQ</a></nav></header>
-    <section className="hero"><div><p className="eyebrow">FOR AMAZON SELLERS · BROWSER-ONLY TOOL</p><h1>Prepare <em>Amazon</em> images for the synthetic-performer disclosure.</h1><p className="lead">检查并添加 <code>{TAG}</code>，供 Amazon Listing 或 A+ 最终图片在适用时使用。文件只在您的浏览器中处理。</p><div className="hero-notes"><span>✓ JPEG & PNG</span><span>✓ No upload</span><span>✓ No duplicate tags</span></div></div><aside className="scope"><strong>适用范围</strong><p>仅面向 Amazon 商品图片、视频或 A+ 内容中含有逼真、完全由 AI 生成的人物的情形。</p><a href="#guide">先了解规则范围 ↓</a></aside></section>
-    <section id="tool" className="tool-card"><div className="tool-intro"><p className="eyebrow">ONE AMAZON FILE AT A TIME</p><h2>检测、添加、下载</h2><p>这不是通用元数据编辑器。它只检查或写入 Amazon 披露所需的单一标签；请先根据 Amazon 规则完成内容判断。</p></div><div className="workbench"><input ref={input} onChange={selectFile} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" id="file" hidden /><button className="dropzone" onClick={() => input.current?.click()}><span className="plus">+</span><strong>{file ? file.name : "选择 Amazon 最终图片"}</strong><small>JPEG 或 PNG · 仅在此设备处理</small></button><div className={`result ${result.kind}`} aria-live="polite"><strong>{result.title}</strong><p>{result.detail}</p></div><button onClick={writeAndDownload} className="primary" disabled={!file || kind === "unsupported" || location?.compressed}>添加 Amazon 披露标签并下载 <span>→</span></button></div></section>
-    <section id="guide" className="content-grid"><article><p className="eyebrow">THE DISCLOSURE</p><h2>什么是这个标签？</h2><p><code>{TAG}</code> 是写进 XMP 元数据的精确文本值。Amazon 的卖家指引要求：在适用情形下，将其作为 XMP <code>dc:subject / rdf:Bag / rdf:li</code> 值，披露逼真、完全由 AI 生成的人物。</p><h3>通常需要考虑添加</h3><ul><li>准备上传到 Listing 或 A+ 内容的图片、视频中，有逼真且完全由 AI 生成的人物。</li><li>您代表品牌或卖家上传的媒体符合 Amazon 所述的披露触发条件。</li></ul><h3>通常不属于该规则</h3><ul><li>没有人物的 AI 生成或 AI 辅助商品图。</li><li>真实人物的 AI 修改、非逼真风格的人物，以及影视、电视或游戏等表达性作品中的角色。</li></ul><p className="caution">Amazon 说明该要求面向其全球站点；实际是否适用仍以您所在站点和账号显示的最新 Seller Central 规则为准。本工具不是 Amazon 官方产品，也不提供合规或法律意见。</p></article><article><p className="eyebrow">WORKFLOW</p><h2>如何验证？</h2><ol><li>选择最终要上传的 JPEG 或 PNG，查看是否已存在标签。</li><li>如未检测到，点击“添加标签并下载”。工具会避免重复写入。</li><li>对下载的新文件重新上传到此页；应显示“已检测到标签”。</li><li>需要独立核验时，用 ExifTool 等元数据查看器检查 XMP <code>dc:subject</code>。</li></ol><h3>隐私与兼容性</h3><p>所有字节解析、XML 修改和下载都在浏览器完成；本页面不设置文件上传接口。当前支持 JPEG XMP APP1 与 PNG XMP iTXt。不会修改像素内容。</p></article></section>
-    <section id="faq" className="faq"><p className="eyebrow">FAQ</p><h2>常见问题</h2><details><summary>这个工具会把图片上传到服务器吗？</summary><p>不会。文件由浏览器的本地 JavaScript 读取和生成，页面没有接收图片的上传端点。</p></details><details><summary>为什么检测到标签仍需要人工判断？</summary><p>标签是否存在与规则是否适用是两个问题。工具只能核验元数据，不会识别图片中的人物或判断 Amazon 政策。</p></details><details><summary>为什么不支持 WebP、HEIC 或视频？</summary><p>这些容器的 XMP 写入和兼容性差异更大。为避免在卖家媒体中造成损坏，本版本只提供经过本地可逆结构校验的 JPEG 和 PNG 写入。</p></details><details><summary>这是否保证 Amazon 会接受文件？</summary><p>不保证。上传要求和政策可能按站点、账号或时间变化；请在上传前查阅适用的 Seller Central 指引。</p></details></section>
-    <section id="sources" className="sources"><p className="eyebrow">SOURCES & TECHNICAL REFERENCES</p><h2>规则来源与技术依据</h2><ul><li><a href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">Amazon Seller Forums — AI-generated people disclosure announcement</a><span>Amazon 官方公告，涵盖适用媒体、全球范围、豁免情形和目标 XMP 字段。</span></li><li><a href="https://sellercentral.amazon.fr/help/hub/reference/external/GFXHCHYZRGJRBZA5?locale=fr-FR" target="_blank" rel="noreferrer">Amazon Seller Central — technical tagging instructions</a><span>公开 Seller Central 帮助页镜像，说明 dc:subject / rdf:Bag / rdf:li 结构与精确值。</span></li><li><a href="https://www.adobe.com/devnet/xmp.html" target="_blank" rel="noreferrer">Adobe — Extensible Metadata Platform (XMP)</a><span>XMP 数据包与元数据框架技术参考。</span></li><li><a href="https://www.exiftool.org/TagNames/XMP.html" target="_blank" rel="noreferrer">ExifTool — XMP tag reference</a><span>用于独立检查 XMP 字段的技术工具参考。</span></li></ul></section>
-    <footer><span>Independent seller utility · Not affiliated with or endorsed by Amazon.</span><a href="#tool">返回工具 ↑</a></footer><script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData }} />
+    <header className="site-header"><a href="#tool" className="brand">AMZ <span>Tag Check</span></a><nav><a href="#when-to-tag">When to tag</a><a href="#how-it-works">How it works</a><a href="#faq">FAQ</a></nav></header>
+    <section className="hero">
+      <p className="eyebrow">AMAZON SELLER TOOL · LOCAL BROWSER PROCESSING</p>
+      <h1>Add Amazon&apos;s AI image disclosure tag.</h1>
+      <p className="lead">Check or add <code>{TAG}</code> to final JPG and PNG listing or A+ images that contain a photorealistic person generated entirely by AI.</p>
+      <div className="trust-row"><span>JPG + PNG</span><span>Pixels unchanged</span><span>Files never uploaded</span></div>
+    </section>
+    <section id="tool" className="tool-shell" aria-labelledby="tool-heading">
+      <div className="tool-heading"><p className="eyebrow">AMAZON DISCLOSURE WORKFLOW</p><h2 id="tool-heading">Tag the final image. Then verify it.</h2><p>This is a focused Amazon seller tool, not a general metadata editor. It writes one exact keyword without replacing your existing XMP keywords.</p></div>
+      <div className="steps">
+        <section className="step-panel"><div className="step-title"><b>01</b><h3>Amazon metadata to add</h3></div><div className="tag-spec"><span>Field <strong>dc:subject (XMP)</strong></span><span>Keyword <code>{TAG}</code></span></div><p className="fine-print">Hidden file metadata — not visible text or a watermark. The exact keyword is fixed to avoid an Amazon-reading mismatch.</p></section>
+        <section className="step-panel"><div className="step-title"><b>02</b><h3>Choose the final Amazon image</h3></div><input ref={input} onChange={selectFile} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" id="file" hidden /><button className="dropzone" onClick={() => input.current?.click()}><span className="upload-mark">↑</span><strong>{file ? file.name : "Choose JPG or PNG"}</strong><small>Drag and drop is supported · files stay in this browser</small></button><p className="fine-print">Use the final exported image, after any cropping, compression, or retouching.</p></section>
+        <section className="step-panel action-panel"><div className="step-title"><b>03</b><h3>Check, tag, and download</h3></div><div className={`result ${result.kind}`} aria-live="polite"><strong>{result.title}</strong><p>{result.detail}</p></div><button onClick={writeAndDownload} className="primary" disabled={!file || kind === "unsupported" || location?.compressed}>Add Amazon disclosure tag <span>→</span></button><p className="fine-print">The downloaded file can be re-uploaded here for a second, local verification.</p></section>
+      </div>
+    </section>
+    <section id="when-to-tag" className="rule-section"><div><p className="eyebrow">USE THE TAG ONLY WHEN IT APPLIES</p><h2>Which Amazon images need the tag?</h2><p>Amazon describes a metadata-based disclosure for images that feature a photorealistic person generated entirely by AI. This tool does not inspect your image or make that compliance decision.</p><a className="text-link" href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">Read Amazon&apos;s current guidance ↗</a></div><div className="decision-table"><div className="decision-head"><span>Image situation</span><span>Add the tag?</span></div><div><span>Photorealistic person generated entirely by AI</span><b className="yes">Yes</b></div><div><span>Real person altered with AI tools</span><b>No</b></div><div><span>AI-generated product or background with no person</span><b>No</b></div><div><span>Cartoon, illustration, or non-photorealistic person</span><b>No</b></div></div></section>
+    <section id="how-it-works" className="explain-section"><p className="eyebrow">HOW THE TOOL HANDLES YOUR FILE</p><h2>One exact value. No pixel re-encoding.</h2><div className="benefit-grid"><article><b>1</b><h3>Read existing XMP</h3><p>It checks whether the Amazon keyword is already present and leaves an existing tag alone.</p></article><article><b>2</b><h3>Append, don&apos;t replace</h3><p>It adds <code>{TAG}</code> to the XMP <code>dc:subject</code> keyword list without replacing unrelated metadata.</p></article><article><b>3</b><h3>Download and recheck</h3><p>The image bytes are not recompressed. Re-upload the result to verify the written XMP locally.</p></article></div></section>
+    <section className="notice"><strong>Before you upload to Amazon</strong><p>Use this tool only for the final files that meet the policy condition. A later image edit, compression, or format conversion can remove metadata. This independent tool is not affiliated with or endorsed by Amazon and does not provide legal or compliance advice.</p></section>
+    <section id="faq" className="faq"><p className="eyebrow">AMAZON AI IMAGE TAGGER FAQ</p><h2>Questions sellers ask before tagging</h2><details open><summary>Does every AI-generated Amazon image need this metadata tag?</summary><p>No. Amazon&apos;s stated condition is a photorealistic person generated entirely by AI. Images with no person, non-photorealistic people, or real people edited with AI do not fall within that condition.</p></details><details><summary>Will the tag appear on the visible image?</summary><p>No. It is XMP metadata inside the file. This tool does not draw a label, watermark, or text onto the image pixels.</p></details><details><summary>Does the tool change image quality or dimensions?</summary><p>No pixels are decoded and re-encoded. JPG XMP APP1 and PNG XMP iTXt metadata are updated while the visual image data is left intact.</p></details><details><summary>Can the tool decide whether my image is covered by Amazon&apos;s rule?</summary><p>No. It only checks and writes the exact XMP value. You remain responsible for applying Amazon&apos;s current policy to the final image.</p></details><details><summary>Why are video, WebP, HEIC, GIF, and AVIF unavailable?</summary><p>Metadata containers and compatibility vary by format. This version deliberately supports only JPG and PNG so it can avoid unsafe or ambiguous writes.</p></details></section>
+    <section id="sources" className="sources"><p className="eyebrow">SOURCES</p><h2>Policy and technical references</h2><ul><li><a href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">Amazon Seller Forums — disclosure announcement</a><span>Official announcement covering the disclosure workflow and scope.</span></li><li><a href="https://sellercentral.amazon.fr/help/hub/reference/external/GFXHCHYZRGJRBZA5?locale=fr-FR" target="_blank" rel="noreferrer">Amazon Seller Central — technical tagging instructions</a><span>Public help-page mirror describing the exact XMP structure.</span></li><li><a href="https://www.adobe.com/devnet/xmp.html" target="_blank" rel="noreferrer">Adobe — Extensible Metadata Platform</a><span>XMP metadata framework reference.</span></li></ul></section>
+    <footer><span>Independent Amazon seller utility. Not affiliated with or endorsed by Amazon.</span><a href="#tool">Back to tool ↑</a></footer><script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData }} />
   </main>;
 }

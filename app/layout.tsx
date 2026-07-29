@@ -3,14 +3,14 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://synthetic-performer-xmp.pages.dev"),
-  title: "Synthetic Performer XMP Tag Tool for Amazon Sellers",
-  description: "Check or add the contains-synthetic-performer XMP disclosure tag to JPEG and PNG files locally in your browser.",
+  title: "Amazon AI Image Tagger: Add contains-synthetic-performer XMP",
+  description: "Check or add Amazon's contains-synthetic-performer XMP tag to final JPG and PNG product listing or A+ images. Process locally in your browser.",
   alternates: { canonical: "/" },
-  openGraph: { title: "Synthetic Performer XMP Tag Tool", description: "Add or verify the XMP disclosure tag locally.", images: ["/og.png"], type: "website" },
-  twitter: { card: "summary_large_image", title: "Synthetic Performer XMP Tag Tool", description: "Add or verify the XMP disclosure tag locally.", images: ["/og.png"] },
+  openGraph: { title: "Amazon AI Image Tagger", description: "Add or verify Amazon's contains-synthetic-performer XMP tag locally.", images: ["/og.png"], type: "website" },
+  twitter: { card: "summary_large_image", title: "Amazon AI Image Tagger", description: "Add or verify Amazon's contains-synthetic-performer XMP tag locally.", images: ["/og.png"] },
   robots: { index: true, follow: true },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="zh-CN"><body>{children}</body></html>;
+  return <html lang="en"><body>{children}</body></html>;
 }
