@@ -2,7 +2,7 @@
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 
-const TAG = "contains-synthetic-performer";
+const DEFAULT_TAG = "contains-synthetic-performer";
 const XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
 const RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const DC_NS = "http://purl.org/dc/elements/1.1/";
@@ -79,13 +79,21 @@ function findPngXmp(bytes: Uint8Array): XmpLocation | undefined {
   }
 }
 
-function defaultXmp() {
-  return `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="${RDF_NS}"><rdf:Description rdf:about="" xmlns:dc="${DC_NS}"><dc:subject><rdf:Bag><rdf:li>${TAG}</rdf:li></rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
+function parseTags(value: string) {
+  return [...new Set(value.split(",").map(tag => tag.trim()).filter(Boolean))];
 }
 
-function addTag(xml: string) {
-  if (xml.toLowerCase().includes(TAG)) return { xml, changed: false };
-  if (!xml) return { xml: defaultXmp(), changed: true };
+function escapeXml(value: string) {
+  return value.replace(/[<>&"']/g, character => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;" })[character] ?? character);
+}
+
+function defaultXmp(tags: string[]) {
+  return `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="${RDF_NS}"><rdf:Description rdf:about="" xmlns:dc="${DC_NS}"><dc:subject><rdf:Bag>${tags.map(tag => `<rdf:li>${escapeXml(tag)}</rdf:li>`).join("")}</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
+}
+
+function addTags(xml: string, tags: string[], preserveExisting: boolean) {
+  if (!tags.length) throw new Error("请至少输入一个要写入的标记。 ");
+  if (!xml) return { xml: defaultXmp(tags), changed: true };
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   if (doc.querySelector("parsererror")) throw new Error("现有 XMP 不是可安全修改的 XML 数据包。");
   let description = doc.getElementsByTagNameNS(RDF_NS, "Description")[0];
@@ -105,9 +113,16 @@ function addTag(xml: string) {
     bag = doc.createElementNS(RDF_NS, "rdf:Bag");
     subject.appendChild(bag);
   }
-  const item = doc.createElementNS(RDF_NS, "rdf:li");
-  item.textContent = TAG;
-  bag.appendChild(item);
+  const existing = Array.from(bag.getElementsByTagNameNS(RDF_NS, "li")).map(item => item.textContent?.trim() ?? "");
+  if (!preserveExisting && existing.length === tags.length && existing.every((tag, index) => tag === tags[index])) return { xml, changed: false };
+  if (preserveExisting && tags.every(tag => existing.includes(tag))) return { xml, changed: false };
+  if (!preserveExisting) while (bag.firstChild) bag.removeChild(bag.firstChild);
+  for (const tag of tags) {
+    if (preserveExisting && existing.includes(tag)) continue;
+    const item = doc.createElementNS(RDF_NS, "rdf:li");
+    item.textContent = tag;
+    bag.appendChild(item);
+  }
   return { xml: new XMLSerializer().serializeToString(doc), changed: true };
 }
 
@@ -175,10 +190,14 @@ export default function Home() {
   const toastTimer = useRef<number>();
   const [items, setItems] = useState<FileItem[]>([]);
   const [language, setLanguage] = useState<"en" | "zh">("en");
+  const [tagValue, setTagValue] = useState(DEFAULT_TAG);
+  const [preserveExisting, setPreserveExisting] = useState(true);
   const [toast, setToast] = useState<string>();
   const t = (en: string, zh: string) => language === "zh" ? zh : en;
+  const tags = parseTags(tagValue);
   const ready = items.filter(item => item.status === "ready").length;
   const completed = items.filter(item => item.output).length;
+  const canProcess = items.some(item => item.status !== "unsupported" && item.status !== "protected" && item.status !== "error");
 
   useEffect(() => { folderInput.current?.setAttribute("webkitdirectory", ""); folderInput.current?.setAttribute("directory", ""); }, []);
 
@@ -190,7 +209,7 @@ export default function Home() {
         if (format === "unsupported") return { id, file, bytes, format, status: "unsupported" as const, detail: "Unsupported format" };
         const location = format === "jpeg" ? findJpegXmp(bytes) : findPngXmp(bytes);
         if (location?.compressed) return { id, file, bytes, format, location, status: "protected" as const, detail: "Compressed PNG XMP" };
-        if (location?.xml.toLowerCase().includes(TAG)) return { id, file, bytes, format, location, status: "already" as const, detail: "Tag already found" };
+        if (location?.xml.toLowerCase().includes(DEFAULT_TAG)) return { id, file, bytes, format, location, status: "already" as const, detail: "Tag already found" };
         return { id, file, bytes, format, location, status: "ready" as const, detail: location ? "Ready to append tag" : "Ready to add XMP" };
       } catch {
         return { id, file, bytes: new Uint8Array(), format: "unsupported" as const, status: "error" as const, detail: "File could not be read. Choose it again." };
@@ -207,12 +226,13 @@ export default function Home() {
   async function selectFiles(event: ChangeEvent<HTMLInputElement>) { const files = Array.from(event.target.files ?? []); if (files.length) await addFiles(files); event.target.value = ""; }
   function dropFiles(event: React.DragEvent<HTMLDivElement>) { event.preventDefault(); const files = Array.from(event.dataTransfer.files); if (files.length) void addFiles(files); }
   function processAll() {
+    if (!tags.length) return;
     setItems(current => current.map(item => {
       if (item.status === "unsupported" || item.status === "protected" || item.status === "error") return item;
       try {
-        const next = addTag(item.location?.xml ?? ""); const output = next.changed ? replace(item.bytes, item.location, item.format === "jpeg" ? jpegSegment(next.xml) : pngXmp(next.xml), item.format) : item.bytes;
+        const next = addTags(item.location?.xml ?? "", tags, preserveExisting); const output = next.changed ? replace(item.bytes, item.location, item.format === "jpeg" ? jpegSegment(next.xml) : pngXmp(next.xml), item.format) : item.bytes;
         const verification = item.format === "jpeg" ? findJpegXmp(output) : findPngXmp(output);
-        if (!verification?.xml.toLowerCase().includes(TAG)) throw new Error("Write verification failed");
+        if (!verification || !tags.every(tag => verification.xml.includes(tag))) throw new Error("Write verification failed");
         return { ...item, status: "done" as const, detail: next.changed ? "Tagged and verified" : "Already tagged and verified", output };
       } catch (error) { return { ...item, status: "error" as const, detail: error instanceof Error ? error.message : "Unable to write tag" }; }
     }));
@@ -229,9 +249,9 @@ export default function Home() {
     <header className="site-header"><a href="#tool" className="brand">AMZ <span>Tagger</span></a><nav><a href="#guide">{t("Guide", "说明")}</a><a href="#faq">FAQ</a><button className="language" onClick={() => setLanguage(language === "en" ? "zh" : "en")}>{language === "en" ? "中文" : "EN"}</button></nav></header>
     <section className="hero hero-batch"><p className="eyebrow">{t("AMAZON COMPLIANCE METADATA · LOCAL PROCESSING", "AMAZON 合规元数据 · 本地处理")}</p><h1>{t("Batch-add contains-synthetic-performer", "批量写入 contains-synthetic-performer")}</h1><p className="lead">{t("Add Amazon's exact XMP disclosure keyword to final JPG and PNG listing or A+ images.", "为最终 JPG / PNG 商品图或 A+ 图片写入 Amazon 指定的 XMP 披露关键词。")}</p><div className="format-row"><span>JPG</span><span>PNG</span><span>{t("Batch processing", "批量处理")}</span></div><div className="privacy-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9 12l2 2 4-4" /></svg><span>{t("Your files stay entirely in this browser", "文件全程留在本地浏览器")}</span><em>{t("Never uploaded to any server", "不上传任何服务器")}</em></div></section>
     <section id="tool" className="workflow" aria-labelledby="workflow-heading"><div className="workflow-intro"><p className="eyebrow">{t("ONE AMAZON-SPECIFIC WORKFLOW", "单一 AMAZON 合规流程")}</p><h2 id="workflow-heading">{t("Write one exact tag. Verify every result.", "写入一个精确标签，逐个验证结果。")}</h2><p>{t("This is not a general metadata editor. It is purpose-built for the Amazon synthetic-performer disclosure workflow.", "这不是通用元数据编辑器；它只服务于 Amazon synthetic-performer 披露流程。")}</p></div>
-      <section className="workspace-panel"><div className="panel-head"><b>01</b><h3>{t("Tag settings", "标签设置")}</h3></div><div className="tag-settings"><label className="keyword-field"><span>{t("Keyword to write (separate multiple values with commas)", "要写入的标记（多个用英文逗号分隔）")}</span><input value={TAG} readOnly aria-label="Amazon XMP keyword" /></label><p>{t("Keep the default value. ", "建议保持默认值。")}<strong>{t("A single wrong character can prevent Amazon from reading it.", "写错一个字符，Amazon 就可能无法读取。")}</strong></p><label className="preserve-setting"><input type="checkbox" checked readOnly /><span>{t("Keep existing tags and append the new one", "保留原有的标记，只追加新的")}</span></label></div></section>
+      <section className="workspace-panel"><div className="panel-head"><b>01</b><h3>{t("Tag settings", "标签设置")}</h3></div><div className="tag-settings"><label className="keyword-field"><span>{t("Keyword to write (separate multiple values with commas)", "要写入的标记（多个用英文逗号分隔）")}</span><input value={tagValue} onChange={event => setTagValue(event.target.value)} aria-label={t("XMP keyword to write", "要写入的 XMP 标记")} aria-describedby="tag-warning" /></label><p id="tag-warning">{t("Keep the default value. ", "建议保持默认值。")}<strong>{t("A single wrong character can prevent Amazon from reading it.", "写错一个字符，Amazon 就可能无法读取。")}</strong></p>{!tags.length && <p className="input-error">{t("Enter at least one keyword before writing.", "请至少输入一个标记后再写入。")}</p>}<label className="preserve-setting"><input type="checkbox" checked={preserveExisting} onChange={event => setPreserveExisting(event.target.checked)} /><span>{t("Keep existing tags and append the new one", "保留原有的标记，只追加新的")}</span></label></div></section>
       <section className="workspace-panel"><div className="panel-head"><b>02</b><h3>{t("Choose images", "选择图片")}</h3><span className="count">{items.length ? t(`${items.length} file${items.length === 1 ? "" : "s"} selected`, `已选择 ${items.length} 个文件`) : t("No files selected", "未选择文件")}</span></div><input ref={input} onChange={selectFiles} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" multiple hidden /><input ref={folderInput} onChange={selectFiles} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" multiple hidden /><div className="batch-dropzone" onDragOver={event => event.preventDefault()} onDrop={dropFiles}><span className="upload-mark">↑</span><strong>{t("Drop final images or a folder here", "将最终图片或整个文件夹拖到这里")}</strong><small>{t("JPG or PNG · select multiple files or a folder · files are never uploaded", "JPG 或 PNG · 支持选择多文件或整个文件夹 · 文件不会上传")}</small><div className="choose-row"><button className="choose-file" onClick={() => input.current?.click()}>{t("Choose files", "选择文件")}</button><button className="choose-file" onClick={() => folderInput.current?.click()}>{t("Choose folder", "选择文件夹")}</button></div></div><p className="fine-print">{t("Use the final exported files, after cropping, compression, or retouching is complete.", "请使用最终导出的文件，在裁剪、压缩或修图全部完成后再添加标签。")}</p></section>
-      <section id="write-download" className="workspace-panel"><div className="panel-head"><b>03</b><h3>{t("Write and download", "写入并下载")}</h3><span className="count">{ready ? t(`${ready} ready to tag`, `${ready} 个待写入`) : t(`${completed} verified`, `已验证 ${completed} 个`)}</span></div><div className="action-row"><button className="primary" onClick={processAll} disabled={!items.length || !ready}>{t("Write tags and verify", "写入并验证")}</button><button className="secondary" onClick={downloadZip} disabled={!completed}>{t("Download ZIP", "下载 ZIP")}</button><button className="text-button" onClick={() => setItems([])} disabled={!items.length}>{t("Clear", "清空")}</button></div><div className="file-list" aria-live="polite">{items.length ? items.map(item => <div className="file-row" key={item.id}><div><strong>{item.file.name}</strong><small>{fileDetail(item)}</small></div><span className={`file-status ${item.status}`}>{statusLabel(item.status)}</span>{item.output && <button className="download-one" onClick={() => download(item)}>{t("Download", "下载")}</button>}</div>) : <p className="empty-state">{t("Add a batch of final JPG or PNG images to inspect their existing XMP before anything is written.", "添加一批最终 JPG 或 PNG 图片；写入前会先检查现有 XMP。")}</p>}</div></section>
+      <section id="write-download" className="workspace-panel"><div className="panel-head"><b>03</b><h3>{t("Write and download", "写入并下载")}</h3><span className="count">{ready ? t(`${ready} ready to tag`, `${ready} 个待写入`) : t(`${completed} verified`, `已验证 ${completed} 个`)}</span></div><div className="action-row"><button className="primary" onClick={processAll} disabled={!canProcess || !tags.length}>{t("Write tags and verify", "写入并验证")}</button><button className="secondary" onClick={downloadZip} disabled={!completed}>{t("Download ZIP", "下载 ZIP")}</button><button className="text-button" onClick={() => setItems([])} disabled={!items.length}>{t("Clear", "清空")}</button></div><div className="file-list" aria-live="polite">{items.length ? items.map(item => <div className="file-row" key={item.id}><div><strong>{item.file.name}</strong><small>{fileDetail(item)}</small></div><span className={`file-status ${item.status}`}>{statusLabel(item.status)}</span>{item.output && <button className="download-one" onClick={() => download(item)}>{t("Download", "下载")}</button>}</div>) : <p className="empty-state">{t("Add a batch of final JPG or PNG images to inspect their existing XMP before anything is written.", "添加一批最终 JPG 或 PNG 图片；写入前会先检查现有 XMP。")}</p>}</div></section>
       <section className="workspace-panel"><div className="panel-head"><b>04</b><h3>{t("Check the tag", "检查标签")}</h3></div><p className="check-copy">{t("Every processed file is read back before it is marked verified. You can also re-add a downloaded file above to inspect it again locally.", "每个处理后的文件都会被读回验证后才标记为“已验证”。也可以把下载后的文件重新添加到上方，再次在本地检查。")}</p></section>
     </section>
     <section id="guide" className="rule-section"><div><p className="eyebrow">{t("USE THE TAG ONLY WHEN IT APPLIES", "仅在适用时添加标签")}</p><h2>{t("Which Amazon images need the tag?", "哪些 Amazon 图片需要此标签？")}</h2><p>{t("Amazon describes a metadata disclosure for images that feature a photorealistic person generated entirely by AI. This tool cannot decide whether an image meets that condition.", "Amazon 对“包含逼真且完全由 AI 生成的人物”的图片规定了元数据披露。本工具无法判断图片是否满足该条件。")}</p><a className="text-link" href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">{t("Read Amazon's current guidance", "查看 Amazon 最新指引")} ↗</a></div><div className="decision-table"><div className="decision-head"><span>{t("Image situation", "图片情况")}</span><span>{t("Add tag?", "需要添加？")}</span></div><div><span>{t("Photorealistic person generated entirely by AI", "逼真且完全由 AI 生成人物")}</span><b className="yes">{t("Yes", "是")}</b></div><div><span>{t("Real person altered with AI tools", "使用 AI 修改的真实人物")}</span><b>{t("No", "否")}</b></div><div><span>{t("AI-generated product or background with no person", "无人像的 AI 商品或背景图")}</span><b>{t("No", "否")}</b></div><div><span>{t("Cartoon, illustration, or non-photorealistic person", "卡通、插画或非写实人物")}</span><b>{t("No", "否")}</b></div></div></section>
