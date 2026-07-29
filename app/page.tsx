@@ -17,10 +17,10 @@ const decoder = new TextDecoder();
 const structuredData = JSON.stringify({ "@context": "https://schema.org", "@graph": [
   { "@type": "SoftwareApplication", name: "亚马逊 AI 图片合规标记工具", applicationCategory: "BusinessApplication", operatingSystem: "Web", browserRequirements: "需要 JavaScript，支持 JPG 与 PNG 文件。", description: "面向 Amazon 卖家的浏览器本地工具，可检测或写入适用图片的 contains-synthetic-performer XMP 标记。", offers: { "@type": "Offer", price: "0", priceCurrency: "USD" }, isAccessibleForFree: true },
   { "@type": "FAQPage", mainEntity: [
-    { "@type": "Question", name: "contains-synthetic-performer 是什么？Amazon 为什么要求添加？", acceptedAnswer: { "@type": "Answer", text: "它是 Amazon 要求卖家写入的精确 XMP 披露关键词，适用于符合条件的 Listing 或 A+ 媒体。Amazon 表示，该标记用于向消费者披露媒体中包含逼真且完全由 AI 生成人物。" } },
-    { "@type": "Question", name: "哪些图片需要标记？AI 修改过的真人图片也需要吗？", acceptedAnswer: { "@type": "Answer", text: "当最终媒体包含逼真且完全由 AI 生成人物时使用。Amazon 说明：仅使用 AI 修改的真人、没有人物的媒体，以及非写实角色或插画通常不需要。最终是否适用仍由卖家判断。" } },
+    { "@type": "Question", name: "contains-synthetic-performer 是什么？Amazon 为什么要求添加？", acceptedAnswer: { "@type": "Answer", text: "这是 Amazon 要求写入的 XMP 披露关键词。符合条件的商品详情页或 A+ 内容图片在上传前需要添加它，用来说明其中有逼真且完全由 AI 生成人物。" } },
+    { "@type": "Question", name: "哪些图片需要标记？AI 修改过的真人图片也需要吗？", acceptedAnswer: { "@type": "Answer", text: "图片中有逼真且完全由 AI 生成人物时，就需要添加。Amazon 说明：只用 AI 修改的真人、没有人物的图片，以及非写实角色或插画，通常不需要。是否适用仍由卖家判断。" } },
     { "@type": "Question", name: "工具把标签写入哪个元数据字段？", acceptedAnswer: { "@type": "Answer", text: "工具会把每个输入的关键词写入 XMP dc:subject / rdf:Bag 的 rdf:li 值中。勾选保留原有标记时，只追加缺失值并避免重复写入。" } },
-    { "@type": "Question", name: "如何确认下载后的文件已正确写入？", acceptedAnswer: { "@type": "Answer", text: "写入后，工具会重新读取生成文件的字节；只有找到所需 XMP 值时才标记为已验证。也可以把下载后的 JPG 或 PNG 重新添加到本页，再做一次本地检查。" } }
+    { "@type": "Question", name: "如何确认下载后的文件已正确写入？", acceptedAnswer: { "@type": "Answer", text: "写入后，工具会重新读取生成的文件。找到所需 XMP 值后，文件才会标记为已验证。也可以把下载后的 JPG 或 PNG 再添加到本页检查一次。" } }
   ] }
 ] });
 
@@ -193,7 +193,32 @@ export default function Home() {
   const [tagValue, setTagValue] = useState(DEFAULT_TAG);
   const [preserveExisting, setPreserveExisting] = useState(true);
   const [toast, setToast] = useState<string>();
-  const t = (en: string, zh: string) => language === "zh" ? zh : en;
+  const zhCopy: Record<string, string> = {
+    "AMAZON 合规元数据 · 本地处理": "Amazon 合规元数据 · 本地处理",
+    "批量写入 contains-synthetic-performer": "批量添加 contains-synthetic-performer",
+    "单一 AMAZON 合规流程": "Amazon 图片合规工具",
+    "写入一个精确标签，逐个验证结果。": "写入指定标签，并逐个验证。",
+    "这不是通用元数据编辑器；它只服务于 Amazon synthetic-performer 披露流程。": "这不是通用元数据编辑器，只用来处理 Amazon 的 synthetic-performer 披露标签。",
+    "将最终图片或整个文件夹拖到这里": "把图片或整个文件夹拖到这里",
+    "JPG 或 PNG · 支持选择多文件或整个文件夹 · 文件不会上传": "JPG 或 PNG · 可选择多个文件或整个文件夹 · 文件始终留在浏览器中",
+    "请使用最终导出的文件，在裁剪、压缩或修图全部完成后再添加标签。": "请在裁剪、压缩和修图完成后，再选择导出的图片文件。",
+    "仅在适用时添加标签": "确认适用后再添加标签",
+    "Amazon 对“包含逼真且完全由 AI 生成的人物”的图片规定了元数据披露。本工具无法判断图片是否满足该条件。": "Amazon 要求为包含逼真、完全由 AI 生成人物的图片写入这项元数据。本工具无法判断图片是否符合这一条件。",
+    "查看 Amazon 最新指引": "查看 Amazon 官方指引",
+    "打标前最常见的问题": "常见问题",
+    "规则与技术参考": "官方规则与技术说明",
+    "独立的 Amazon 卖家工具；与 Amazon 不存在隶属或授权关系。": "本工具独立开发，与 Amazon 没有隶属或授权关系。",
+    "标签写入后已成功读回验证": "已写入并验证",
+    "不会修改压缩 PNG XMP": "压缩的 PNG XMP 暂不支持修改",
+    "没有可处理的已选文件。": "没有可处理的图片。",
+    "它是 Amazon 要求卖家写入的精确 XMP 披露关键词，适用于符合条件的 Listing 或 A+ 媒体。Amazon 表示，该标记用于向消费者披露媒体中包含逼真且完全由 AI 生成人物。": "这是 Amazon 要求写入的 XMP 披露关键词。符合条件的商品详情页或 A+ 内容图片在上传前需要添加它，用来说明其中有逼真且完全由 AI 生成人物。",
+    "当最终媒体包含逼真且完全由 AI 生成人物时使用。Amazon 说明：仅使用 AI 修改的真人、没有人物的媒体，以及非写实角色或插画通常不需要。最终是否适用仍由卖家判断。": "图片中有逼真且完全由 AI 生成人物时，就需要添加。Amazon 说明：只用 AI 修改的真人、没有人物的图片，以及非写实角色或插画，通常不需要。是否适用仍由卖家判断。",
+    "写入后，工具会重新读取生成文件的字节；只有找到所需 XMP 值时才标记为“已验证”。也可以把下载后的 JPG 或 PNG 重新添加到本页，再做一次本地检查。": "写入后，工具会重新读取生成的文件。找到所需 XMP 值后，文件才会标记为“已验证”。也可以把下载后的 JPG 或 PNG 再添加到本页检查一次。",
+    "当前版本只支持能在浏览器中安全写入并验证 XMP 的 JPG 和 PNG 结构。不支持、受保护或无法读取的文件会放入可收起的提示列表，不会进入写入流程。": "目前只支持 JPG 和 PNG，因为这两种格式可在浏览器中安全写入并验证 XMP。不支持、受保护或无法读取的文件会放在可收起的提示列表中，不会进入写入流程。",
+    "此前已上传的图片需要补写标签吗？": "已经上传的图片需要补写标签吗？",
+    "Amazon 的公开公告重点说明新上传内容的合规要求。对于既有媒体，请在编辑或重新上传 Listing 时查看最新 Seller Central 指引；本工具不会判断旧素材的政策义务。": "Amazon 的公开公告重点说明新上传内容的要求。已上传的图片如果需要编辑或重新上传，请查看最新的 Seller Central 指引；本工具无法判断旧图片是否必须补写。"
+  };
+  const t = (en: string, zh: string) => language === "zh" ? (zhCopy[zh] ?? zh) : en;
   const tags = parseTags(tagValue);
   const ready = items.filter(item => item.status === "ready").length;
   const completed = items.filter(item => item.output).length;
@@ -249,7 +274,7 @@ export default function Home() {
 
   return <main>
     <header className="site-header"><a href="#tool" className="brand">AMZ <span>Tagger</span></a><nav><a href="#guide">{t("Guide", "说明")}</a><a href="#faq">FAQ</a><button className="language" onClick={() => setLanguage(language === "en" ? "zh" : "en")}>{language === "en" ? "中文" : "EN"}</button></nav></header>
-    <section className="hero hero-batch"><p className="eyebrow">{t("AMAZON COMPLIANCE METADATA · LOCAL PROCESSING", "AMAZON 合规元数据 · 本地处理")}</p><h1>{t("Batch-add contains-synthetic-performer", "批量写入 contains-synthetic-performer")}</h1><p className="lead">{language === "zh" ? <>批量写入 Amazon 要求的 <strong>XMP dc:subject</strong> 合规标记，适用于最终 JPG / PNG 商品图和 A+ 图片。</> : <>Batch-write Amazon&apos;s required <strong>XMP dc:subject</strong> compliance tag for final JPG / PNG listing and A+ images.</>}</p><div className="format-row"><span>JPG</span><span>PNG</span><span>{t("Batch processing", "批量处理")}</span></div><div className="privacy-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9 12l2 2 4-4" /></svg><span>{t("Your files stay entirely in this browser", "文件全程留在本地浏览器")}</span><em>{t("Never uploaded to any server", "不上传任何服务器")}</em></div></section>
+    <section className="hero hero-batch"><p className="eyebrow">{t("AMAZON COMPLIANCE METADATA · LOCAL PROCESSING", "AMAZON 合规元数据 · 本地处理")}</p><h1>{t("Batch-add contains-synthetic-performer", "批量写入 contains-synthetic-performer")}</h1><p className="lead">{language === "zh" ? <>批量写入 Amazon 要求的 <strong>XMP dc:subject</strong> 合规标记。支持 JPG、PNG 商品图和 A+ 内容图片。</> : <>Batch-write Amazon&apos;s required <strong>XMP dc:subject</strong> compliance tag for JPG / PNG product and A+ content images.</>}</p><div className="format-row"><span>JPG</span><span>PNG</span><span>{t("Batch processing", "批量处理")}</span></div><div className="privacy-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9 12l2 2 4-4" /></svg><span>{t("Your files stay entirely in this browser", "文件全程留在本地浏览器")}</span><em>{t("Never uploaded to any server", "不上传任何服务器")}</em></div></section>
     <section id="tool" className="workflow" aria-labelledby="workflow-heading"><div className="workflow-intro"><p className="eyebrow">{t("ONE AMAZON-SPECIFIC WORKFLOW", "单一 AMAZON 合规流程")}</p><h2 id="workflow-heading">{t("Write one exact tag. Verify every result.", "写入一个精确标签，逐个验证结果。")}</h2><p>{t("This is not a general metadata editor. It is purpose-built for the Amazon synthetic-performer disclosure workflow.", "这不是通用元数据编辑器；它只服务于 Amazon synthetic-performer 披露流程。")}</p></div>
       <section className="workspace-panel"><div className="panel-head"><b>01</b><h3>{t("Tag settings", "标签设置")}</h3></div><div className="tag-settings"><label className="keyword-field"><span>{t("Keyword to write (separate multiple values with commas)", "要写入的标记（多个用英文逗号分隔）")}</span><input value={tagValue} onChange={event => setTagValue(event.target.value)} aria-label={t("XMP keyword to write", "要写入的 XMP 标记")} aria-describedby="tag-warning" /></label><p id="tag-warning">{t("Keep the default value. ", "建议保持默认值。")}<strong>{t("A single wrong character can prevent Amazon from reading it.", "写错一个字符，Amazon 就可能无法读取。")}</strong></p>{!tags.length && <p className="input-error">{t("Enter at least one keyword before writing.", "请至少输入一个标记后再写入。")}</p>}<label className="preserve-setting"><input type="checkbox" checked={preserveExisting} onChange={event => setPreserveExisting(event.target.checked)} /><span>{t("Keep existing tags and append the new one", "保留原有的标记，只追加新的")}</span></label></div></section>
       <section className="workspace-panel"><div className="panel-head"><b>02</b><h3>{t("Choose images", "选择图片")}</h3><span className="count">{items.length ? t(`${items.length} file${items.length === 1 ? "" : "s"} selected`, `已选择 ${items.length} 个文件`) : t("No files selected", "未选择文件")}</span></div><input ref={input} onChange={selectFiles} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" multiple hidden /><input ref={folderInput} onChange={selectFiles} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" multiple hidden /><div className="batch-dropzone" onDragOver={event => event.preventDefault()} onDrop={dropFiles}><span className="upload-mark">↑</span><strong>{t("Drop final images or a folder here", "将最终图片或整个文件夹拖到这里")}</strong><small>{t("JPG or PNG · select multiple files or a folder · files are never uploaded", "JPG 或 PNG · 支持选择多文件或整个文件夹 · 文件不会上传")}</small><div className="choose-row"><button className="choose-file" onClick={() => input.current?.click()}>{t("Choose files", "选择文件")}</button><button className="choose-file" onClick={() => folderInput.current?.click()}>{t("Choose folder", "选择文件夹")}</button></div></div><p className="fine-print">{t("Use the final exported files, after cropping, compression, or retouching is complete.", "请使用最终导出的文件，在裁剪、压缩或修图全部完成后再添加标签。")}</p></section>
