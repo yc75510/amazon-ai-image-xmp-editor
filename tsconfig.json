@@ -30,13 +30,5 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": [
-    "node_modules",
-    "app/chatgpt-auth.ts",
-    "build",
-    "db",
-    "drizzle",
-    "examples",
-    "worker"
-  ]
+  "exclude": ["node_modules"]
 }

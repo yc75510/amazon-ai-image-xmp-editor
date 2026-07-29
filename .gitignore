@@ -37,9 +37,5 @@ yarn-error.log*
 # typescript
 next-env.d.ts
 /dist/
-/.wrangler/
-/outputs/
-/work/
 /out/
 *.tar.gz
-.openai/hosting.json
