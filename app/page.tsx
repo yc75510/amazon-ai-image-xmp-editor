@@ -9,7 +9,8 @@ const DC_NS = "http://purl.org/dc/elements/1.1/";
 
 type Kind = "jpeg" | "png" | "unsupported";
 type XmpLocation = { start: number; end: number; xml: string; compressed?: boolean };
-type Result = { kind: "neutral" | "success" | "warning" | "error"; title: string; detail: string };
+type FileStatus = "ready" | "already" | "unsupported" | "protected" | "done" | "error";
+type FileItem = { id: string; file: File; bytes: Uint8Array; format: Kind; location?: XmpLocation; status: FileStatus; detail: string; output?: Uint8Array };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -150,64 +151,75 @@ function replace(bytes: Uint8Array, target: XmpLocation | undefined, replacement
   throw new Error("PNG 文件结构不完整。");
 }
 
+function zipFiles(entries: Array<{ name: string; bytes: Uint8Array }>) {
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const local: Uint8Array[] = []; const central: Uint8Array[] = []; let offset = 0;
+  for (const entry of entries) {
+    const name = encoder.encode(entry.name); const checksum = crc32(entry.bytes);
+    const header = new Uint8Array(30 + name.length); const view = new DataView(header.buffer);
+    view.setUint32(0, 0x04034b50, true); view.setUint16(4, 20, true); view.setUint16(10, dosTime, true); view.setUint16(12, dosDate, true); view.setUint32(14, checksum, true); view.setUint32(18, entry.bytes.length, true); view.setUint32(22, entry.bytes.length, true); view.setUint16(26, name.length, true); header.set(name, 30);
+    local.push(header, entry.bytes);
+    const directory = new Uint8Array(46 + name.length); const dir = new DataView(directory.buffer);
+    dir.setUint32(0, 0x02014b50, true); dir.setUint16(4, 20, true); dir.setUint16(6, 20, true); dir.setUint16(12, dosTime, true); dir.setUint16(14, dosDate, true); dir.setUint32(16, checksum, true); dir.setUint32(20, entry.bytes.length, true); dir.setUint32(24, entry.bytes.length, true); dir.setUint16(28, name.length, true); dir.setUint32(42, offset, true); directory.set(name, 46); central.push(directory); offset += header.length + entry.bytes.length;
+  }
+  const centralBytes = concat(central); const end = new Uint8Array(22); const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true); endView.setUint16(8, entries.length, true); endView.setUint16(10, entries.length, true); endView.setUint32(12, centralBytes.length, true); endView.setUint32(16, offset, true);
+  return concat([...local, centralBytes, end]);
+}
+
 export default function Home() {
   const input = useRef<HTMLInputElement>(null);
-  const [file, setFile] = useState<File>();
-  const [bytes, setBytes] = useState<Uint8Array>();
-  const [kind, setKind] = useState<Kind>("unsupported");
-  const [location, setLocation] = useState<XmpLocation>();
-  const [result, setResult] = useState<Result>({ kind: "neutral", title: "Ready to check", detail: "Choose a final JPG or PNG image to inspect its XMP metadata." });
+  const [items, setItems] = useState<FileItem[]>([]);
+  const [language, setLanguage] = useState<"en" | "zh">("en");
+  const t = (en: string, zh: string) => language === "zh" ? zh : en;
+  const ready = items.filter(item => item.status === "ready").length;
+  const completed = items.filter(item => item.output).length;
 
-  async function selectFile(event: ChangeEvent<HTMLInputElement>) {
-    const selected = event.target.files?.[0];
-    if (!selected) return;
-    const data = new Uint8Array(await selected.arrayBuffer());
-    const detected = kindOf(data);
-    setFile(selected); setBytes(data); setKind(detected);
-    if (detected === "unsupported") { setLocation(undefined); setResult({ kind: "warning", title: "This format is not supported", detail: "This focused tool safely reads and writes JPG and PNG only. It does not process video, HEIC, WebP, GIF, or AVIF." }); return; }
-    const xmp = detected === "jpeg" ? findJpegXmp(data) : findPngXmp(data);
-    setLocation(xmp);
-    if (xmp?.compressed) setResult({ kind: "warning", title: "Compressed PNG XMP found", detail: "This file has compressed PNG XMP. It will not be rewritten, to avoid damaging existing metadata." });
-    else if (xmp?.xml.toLowerCase().includes(TAG)) setResult({ kind: "success", title: "Amazon disclosure tag found", detail: `The XMP packet contains ${TAG}. No duplicate tag is needed.` });
-    else setResult({ kind: "warning", title: "Amazon disclosure tag not found", detail: xmp ? "An XMP packet exists, but it does not contain the required keyword." : "No readable XMP packet was found. A new XMP packet can be added." });
+  async function addFiles(files: File[]) {
+    const incoming = await Promise.all(files.map(async file => {
+      const bytes = new Uint8Array(await file.arrayBuffer()); const format = kindOf(bytes); const id = `${file.name}-${file.lastModified}-${Math.random()}`;
+      if (format === "unsupported") return { id, file, bytes, format, status: "unsupported" as const, detail: "Unsupported format" };
+      const location = format === "jpeg" ? findJpegXmp(bytes) : findPngXmp(bytes);
+      if (location?.compressed) return { id, file, bytes, format, location, status: "protected" as const, detail: "Compressed PNG XMP" };
+      if (location?.xml.toLowerCase().includes(TAG)) return { id, file, bytes, format, location, status: "already" as const, detail: "Tag already found" };
+      return { id, file, bytes, format, location, status: "ready" as const, detail: location ? "Ready to append tag" : "Ready to add XMP" };
+    }));
+    setItems(current => [...current, ...incoming]);
   }
-
-  function writeAndDownload() {
-    if (!file || !bytes || kind === "unsupported") return;
-    try {
-      if (location?.compressed) throw new Error("Compressed PNG XMP cannot be safely updated by this version.");
-      const next = addTag(location?.xml ?? "");
-      if (!next.changed) { setResult({ kind: "success", title: "No update needed", detail: "The exact disclosure tag already exists, so no duplicate was written." }); return; }
-      const output = replace(bytes, location, kind === "jpeg" ? jpegSegment(next.xml) : pngXmp(next.xml), kind);
-      const extension = kind === "jpeg" ? "jpg" : "png";
-      const base = file.name.replace(/\.[^.]+$/, "");
-      const url = URL.createObjectURL(new Blob([output], { type: kind === "jpeg" ? "image/jpeg" : "image/png" }));
-      const link = document.createElement("a"); link.href = url; link.download = `${base}-synthetic-performer.${extension}`; link.click(); URL.revokeObjectURL(url);
-      setResult({ kind: "success", title: "Tag written — download started", detail: "Re-upload the downloaded file here to confirm the tag, or inspect XMP dc:subject with an independent metadata reader." });
-    } catch (error) { setResult({ kind: "error", title: "File was not changed", detail: error instanceof Error ? error.message : "An unexpected error occurred." }); }
+  async function selectFiles(event: ChangeEvent<HTMLInputElement>) { const files = Array.from(event.target.files ?? []); if (files.length) await addFiles(files); event.target.value = ""; }
+  function dropFiles(event: React.DragEvent<HTMLButtonElement>) { event.preventDefault(); const files = Array.from(event.dataTransfer.files); if (files.length) void addFiles(files); }
+  function processAll() {
+    setItems(current => current.map(item => {
+      if (item.status === "unsupported" || item.status === "protected" || item.status === "error") return item;
+      try {
+        const next = addTag(item.location?.xml ?? ""); const output = next.changed ? replace(item.bytes, item.location, item.format === "jpeg" ? jpegSegment(next.xml) : pngXmp(next.xml), item.format) : item.bytes;
+        const verification = item.format === "jpeg" ? findJpegXmp(output) : findPngXmp(output);
+        if (!verification?.xml.toLowerCase().includes(TAG)) throw new Error("Write verification failed");
+        return { ...item, status: "done" as const, detail: next.changed ? "Tagged and verified" : "Already tagged and verified", output };
+      } catch (error) { return { ...item, status: "error" as const, detail: error instanceof Error ? error.message : "Unable to write tag" }; }
+    }));
   }
+  function download(item: FileItem) {
+    if (!item.output) return; const extension = item.format === "jpeg" ? "jpg" : "png"; const name = `${item.file.name.replace(/\.[^.]+$/, "")}-synthetic-performer.${extension}`;
+    const url = URL.createObjectURL(new Blob([item.output], { type: item.format === "jpeg" ? "image/jpeg" : "image/png" })); const link = document.createElement("a"); link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
+  }
+  function downloadZip() { const files = items.filter((item): item is FileItem & { output: Uint8Array } => Boolean(item.output)); if (!files.length) return; const names = new Map<string, number>(); const zip = zipFiles(files.map(item => { const base = `${item.file.name.replace(/\.[^.]+$/, "")}-synthetic-performer.${item.format === "jpeg" ? "jpg" : "png"}`; const count = names.get(base) ?? 0; names.set(base, count + 1); return { name: count ? base.replace(/(\.[^.]+)$/, `-${count + 1}$1`) : base, bytes: item.output }; })); const url = URL.createObjectURL(new Blob([zip], { type: "application/zip" })); const link = document.createElement("a"); link.href = url; link.download = "amazon-synthetic-performer-tagged.zip"; link.click(); URL.revokeObjectURL(url); }
+  const statusLabel = (status: FileStatus) => ({ ready: t("Ready", "待处理"), already: t("Already tagged", "已存在标签"), unsupported: t("Unsupported", "不支持"), protected: t("Protected XMP", "受保护的 XMP"), done: t("Verified", "已验证"), error: t("Error", "错误") })[status];
 
   return <main>
-    <header className="site-header"><a href="#tool" className="brand">AMZ <span>Tag Check</span></a><nav><a href="#when-to-tag">When to tag</a><a href="#how-it-works">How it works</a><a href="#faq">FAQ</a></nav></header>
-    <section className="hero">
-      <p className="eyebrow">AMAZON SELLER TOOL · LOCAL BROWSER PROCESSING</p>
-      <h1>Add Amazon&apos;s AI image disclosure tag.</h1>
-      <p className="lead">Check or add <code>{TAG}</code> to final JPG and PNG listing or A+ images that contain a photorealistic person generated entirely by AI.</p>
-      <div className="trust-row"><span>JPG + PNG</span><span>Pixels unchanged</span><span>Files never uploaded</span></div>
+    <header className="site-header"><a href="#tool" className="brand">AMZ <span>Tagger</span></a><nav><a href="#guide">{t("Guide", "说明")}</a><a href="#faq">FAQ</a><button className="language" onClick={() => setLanguage(language === "en" ? "zh" : "en")}>{language === "en" ? "中文" : "EN"}</button></nav></header>
+    <section className="hero hero-batch"><p className="eyebrow">{t("AMAZON COMPLIANCE METADATA · LOCAL PROCESSING", "AMAZON 合规元数据 · 本地处理")}</p><h1>{t("Batch-add contains-synthetic-performer", "批量写入 contains-synthetic-performer")}</h1><p className="lead">{t("Add Amazon's exact XMP disclosure keyword to final JPG and PNG listing or A+ images. Your files stay in this browser.", "为最终 JPG / PNG 商品图或 A+ 图片写入 Amazon 指定的 XMP 披露关键词。文件始终留在您的浏览器中。")}</p><div className="format-row"><span>JPG</span><span>PNG</span><span>{t("Batch processing", "批量处理")}</span><span>{t("No upload", "不上传文件")}</span></div></section>
+    <section id="tool" className="workflow" aria-labelledby="workflow-heading"><div className="workflow-intro"><p className="eyebrow">{t("ONE AMAZON-SPECIFIC WORKFLOW", "单一 AMAZON 合规流程")}</p><h2 id="workflow-heading">{t("Write one exact tag. Verify every result.", "写入一个精确标签，逐个验证结果。")}</h2><p>{t("This is not a general metadata editor. It is purpose-built for the Amazon synthetic-performer disclosure workflow.", "这不是通用元数据编辑器；它只服务于 Amazon synthetic-performer 披露流程。")}</p></div>
+      <section className="workspace-panel"><div className="panel-head"><b>01</b><h3>{t("Tag settings", "标签设置")}</h3></div><div className="tag-settings"><label>{t("Amazon keyword", "Amazon 关键词")}<input value={TAG} readOnly aria-label="Amazon XMP keyword" /></label><p>{t("The value is locked. One character wrong can prevent Amazon from reading it.", "关键词固定。一个字符错误，都可能导致 Amazon 无法读取。")}</p><span>✓ {t("Keep existing XMP keywords and append this one", "保留原有 XMP 关键词，只追加此标签")}</span></div></section>
+      <section className="workspace-panel"><div className="panel-head"><b>02</b><h3>{t("Choose images", "选择图片")}</h3><span className="count">{items.length ? t(`${items.length} file${items.length === 1 ? "" : "s"} selected`, `已选择 ${items.length} 个文件`) : t("No files selected", "未选择文件")}</span></div><input ref={input} onChange={selectFiles} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" multiple hidden /><button className="batch-dropzone" onClick={() => input.current?.click()} onDragOver={event => event.preventDefault()} onDrop={dropFiles}><span className="upload-mark">↑</span><strong>{t("Drop final Amazon images here", "将最终 Amazon 图片拖到这里")}</strong><small>{t("JPG or PNG · select multiple files · files are never uploaded", "JPG 或 PNG · 支持一次选择多个文件 · 文件不会上传")}</small><span className="choose-file">{t("Choose images", "选择图片")}</span></button><p className="fine-print">{t("Use the final exported files, after cropping, compression, or retouching is complete.", "请使用最终导出的文件，在裁剪、压缩或修图全部完成后再添加标签。")}</p></section>
+      <section className="workspace-panel"><div className="panel-head"><b>03</b><h3>{t("Write and download", "写入并下载")}</h3><span className="count">{ready ? t(`${ready} ready to tag`, `${ready} 个待写入`) : t(`${completed} verified`, `已验证 ${completed} 个`)}</span></div><div className="action-row"><button className="primary" onClick={processAll} disabled={!items.length || !ready}>{t("Write tags and verify", "写入并验证")}</button><button className="secondary" onClick={downloadZip} disabled={!completed}>{t("Download ZIP", "下载 ZIP")}</button><button className="text-button" onClick={() => setItems([])} disabled={!items.length}>{t("Clear", "清空")}</button></div><div className="file-list" aria-live="polite">{items.length ? items.map(item => <div className="file-row" key={item.id}><div><strong>{item.file.name}</strong><small>{item.detail}</small></div><span className={`file-status ${item.status}`}>{statusLabel(item.status)}</span>{item.output && <button className="download-one" onClick={() => download(item)}>{t("Download", "下载")}</button>}</div>) : <p className="empty-state">{t("Add a batch of final JPG or PNG images to inspect their existing XMP before anything is written.", "添加一批最终 JPG 或 PNG 图片；写入前会先检查现有 XMP。")}</p>}</div></section>
+      <section className="workspace-panel"><div className="panel-head"><b>04</b><h3>{t("Check the tag", "检查标签")}</h3></div><p className="check-copy">{t("Every processed file is read back before it is marked verified. You can also re-add a downloaded file above to inspect it again locally.", "每个处理后的文件都会被读回验证后才标记为“已验证”。也可以把下载后的文件重新添加到上方，再次在本地检查。")}</p></section>
     </section>
-    <section id="tool" className="tool-shell" aria-labelledby="tool-heading">
-      <div className="tool-heading"><p className="eyebrow">AMAZON DISCLOSURE WORKFLOW</p><h2 id="tool-heading">Tag the final image. Then verify it.</h2><p>This is a focused Amazon seller tool, not a general metadata editor. It writes one exact keyword without replacing your existing XMP keywords.</p></div>
-      <div className="steps">
-        <section className="step-panel"><div className="step-title"><b>01</b><h3>Amazon metadata to add</h3></div><div className="tag-spec"><span>Field <strong>dc:subject (XMP)</strong></span><span>Keyword <code>{TAG}</code></span></div><p className="fine-print">Hidden file metadata — not visible text or a watermark. The exact keyword is fixed to avoid an Amazon-reading mismatch.</p></section>
-        <section className="step-panel"><div className="step-title"><b>02</b><h3>Choose the final Amazon image</h3></div><input ref={input} onChange={selectFile} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" id="file" hidden /><button className="dropzone" onClick={() => input.current?.click()}><span className="upload-mark">↑</span><strong>{file ? file.name : "Choose JPG or PNG"}</strong><small>Drag and drop is supported · files stay in this browser</small></button><p className="fine-print">Use the final exported image, after any cropping, compression, or retouching.</p></section>
-        <section className="step-panel action-panel"><div className="step-title"><b>03</b><h3>Check, tag, and download</h3></div><div className={`result ${result.kind}`} aria-live="polite"><strong>{result.title}</strong><p>{result.detail}</p></div><button onClick={writeAndDownload} className="primary" disabled={!file || kind === "unsupported" || location?.compressed}>Add Amazon disclosure tag <span>→</span></button><p className="fine-print">The downloaded file can be re-uploaded here for a second, local verification.</p></section>
-      </div>
-    </section>
-    <section id="when-to-tag" className="rule-section"><div><p className="eyebrow">USE THE TAG ONLY WHEN IT APPLIES</p><h2>Which Amazon images need the tag?</h2><p>Amazon describes a metadata-based disclosure for images that feature a photorealistic person generated entirely by AI. This tool does not inspect your image or make that compliance decision.</p><a className="text-link" href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">Read Amazon&apos;s current guidance ↗</a></div><div className="decision-table"><div className="decision-head"><span>Image situation</span><span>Add the tag?</span></div><div><span>Photorealistic person generated entirely by AI</span><b className="yes">Yes</b></div><div><span>Real person altered with AI tools</span><b>No</b></div><div><span>AI-generated product or background with no person</span><b>No</b></div><div><span>Cartoon, illustration, or non-photorealistic person</span><b>No</b></div></div></section>
-    <section id="how-it-works" className="explain-section"><p className="eyebrow">HOW THE TOOL HANDLES YOUR FILE</p><h2>One exact value. No pixel re-encoding.</h2><div className="benefit-grid"><article><b>1</b><h3>Read existing XMP</h3><p>It checks whether the Amazon keyword is already present and leaves an existing tag alone.</p></article><article><b>2</b><h3>Append, don&apos;t replace</h3><p>It adds <code>{TAG}</code> to the XMP <code>dc:subject</code> keyword list without replacing unrelated metadata.</p></article><article><b>3</b><h3>Download and recheck</h3><p>The image bytes are not recompressed. Re-upload the result to verify the written XMP locally.</p></article></div></section>
-    <section className="notice"><strong>Before you upload to Amazon</strong><p>Use this tool only for the final files that meet the policy condition. A later image edit, compression, or format conversion can remove metadata. This independent tool is not affiliated with or endorsed by Amazon and does not provide legal or compliance advice.</p></section>
-    <section id="faq" className="faq"><p className="eyebrow">AMAZON AI IMAGE TAGGER FAQ</p><h2>Questions sellers ask before tagging</h2><details open><summary>Does every AI-generated Amazon image need this metadata tag?</summary><p>No. Amazon&apos;s stated condition is a photorealistic person generated entirely by AI. Images with no person, non-photorealistic people, or real people edited with AI do not fall within that condition.</p></details><details><summary>Will the tag appear on the visible image?</summary><p>No. It is XMP metadata inside the file. This tool does not draw a label, watermark, or text onto the image pixels.</p></details><details><summary>Does the tool change image quality or dimensions?</summary><p>No pixels are decoded and re-encoded. JPG XMP APP1 and PNG XMP iTXt metadata are updated while the visual image data is left intact.</p></details><details><summary>Can the tool decide whether my image is covered by Amazon&apos;s rule?</summary><p>No. It only checks and writes the exact XMP value. You remain responsible for applying Amazon&apos;s current policy to the final image.</p></details><details><summary>Why are video, WebP, HEIC, GIF, and AVIF unavailable?</summary><p>Metadata containers and compatibility vary by format. This version deliberately supports only JPG and PNG so it can avoid unsafe or ambiguous writes.</p></details></section>
-    <section id="sources" className="sources"><p className="eyebrow">SOURCES</p><h2>Policy and technical references</h2><ul><li><a href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">Amazon Seller Forums — disclosure announcement</a><span>Official announcement covering the disclosure workflow and scope.</span></li><li><a href="https://sellercentral.amazon.fr/help/hub/reference/external/GFXHCHYZRGJRBZA5?locale=fr-FR" target="_blank" rel="noreferrer">Amazon Seller Central — technical tagging instructions</a><span>Public help-page mirror describing the exact XMP structure.</span></li><li><a href="https://www.adobe.com/devnet/xmp.html" target="_blank" rel="noreferrer">Adobe — Extensible Metadata Platform</a><span>XMP metadata framework reference.</span></li></ul></section>
-    <footer><span>Independent Amazon seller utility. Not affiliated with or endorsed by Amazon.</span><a href="#tool">Back to tool ↑</a></footer><script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData }} />
+    <section id="guide" className="rule-section"><div><p className="eyebrow">{t("USE THE TAG ONLY WHEN IT APPLIES", "仅在适用时添加标签")}</p><h2>{t("Which Amazon images need the tag?", "哪些 Amazon 图片需要此标签？")}</h2><p>{t("Amazon describes a metadata disclosure for images that feature a photorealistic person generated entirely by AI. This tool cannot decide whether an image meets that condition.", "Amazon 对“包含逼真且完全由 AI 生成的人物”的图片规定了元数据披露。本工具无法判断图片是否满足该条件。")}</p><a className="text-link" href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">{t("Read Amazon's current guidance", "查看 Amazon 最新指引")} ↗</a></div><div className="decision-table"><div className="decision-head"><span>{t("Image situation", "图片情况")}</span><span>{t("Add tag?", "需要添加？")}</span></div><div><span>{t("Photorealistic person generated entirely by AI", "逼真且完全由 AI 生成人物")}</span><b className="yes">{t("Yes", "是")}</b></div><div><span>{t("Real person altered with AI tools", "使用 AI 修改的真实人物")}</span><b>{t("No", "否")}</b></div><div><span>{t("AI-generated product or background with no person", "无人像的 AI 商品或背景图")}</span><b>{t("No", "否")}</b></div><div><span>{t("Cartoon, illustration, or non-photorealistic person", "卡通、插画或非写实人物")}</span><b>{t("No", "否")}</b></div></div></section>
+    <section id="faq" className="faq"><p className="eyebrow">FAQ</p><h2>{t("Questions sellers ask before tagging", "卖家在打标前常问的问题")}</h2><details open><summary>{t("Will the tag appear on the visible image?", "标签会出现在图片画面里吗？")}</summary><p>{t("No. It is XMP metadata inside the file. The tool does not draw a label, watermark, or text onto the image pixels.", "不会。标签是文件内的 XMP 元数据；工具不会在图片像素上绘制标签、水印或文字。")}</p></details><details><summary>{t("Does batch tagging change image quality or dimensions?", "批量打标会改变画质或尺寸吗？")}</summary><p>{t("No pixels are decoded and re-encoded. Only JPG XMP APP1 and PNG XMP iTXt metadata are updated.", "不会重新解码或编码像素；只会更新 JPG 的 XMP APP1 或 PNG 的 XMP iTXt 元数据。")}</p></details><details><summary>{t("Why are video, WebP, HEIC, GIF, and AVIF unavailable?", "为什么不支持视频、WebP、HEIC、GIF 与 AVIF？")}</summary><p>{t("This version deliberately supports only JPG and PNG, where the browser writer can make a safe and verifiable metadata update.", "当前版本刻意只支持 JPG 和 PNG，以确保浏览器能够安全写入并验证元数据。")}</p></details></section>
+    <section id="sources" className="sources"><p className="eyebrow">{t("SOURCES", "来源")}</p><h2>{t("Policy and technical references", "规则与技术参考")}</h2><ul><li><a href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">Amazon Seller Forums — disclosure announcement</a><span>{t("Official disclosure scope and workflow.", "官方披露范围与流程说明。")}</span></li><li><a href="https://sellercentral.amazon.fr/help/hub/reference/external/GFXHCHYZRGJRBZA5?locale=fr-FR" target="_blank" rel="noreferrer">Amazon Seller Central — technical instructions</a><span>{t("Public help-page mirror describing the XMP structure.", "说明 XMP 结构的公开帮助页镜像。")}</span></li><li><a href="https://www.adobe.com/devnet/xmp.html" target="_blank" rel="noreferrer">Adobe — Extensible Metadata Platform</a><span>{t("XMP technical reference.", "XMP 技术参考。")}</span></li></ul></section>
+    <footer><span>{t("Independent Amazon seller utility. Not affiliated with or endorsed by Amazon.", "独立的 Amazon 卖家工具；与 Amazon 不存在隶属或授权关系。")}</span><a href="#tool">{t("Back to tool", "返回工具")} ↑</a></footer><script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData }} />
   </main>;
 }
