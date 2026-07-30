@@ -1,14 +1,15 @@
 "use client";
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { createDownloadSet, downloadZipFilename, type DownloadCandidate } from "./download-set";
+import { inspectImageMetadata, TARGET_TAG } from "./image-metadata";
 
-const DEFAULT_TAG = "contains-synthetic-performer";
+const DEFAULT_TAG = TARGET_TAG;
 const XMP_HEADER = "http://ns.adobe.com/xap/1.0/\0";
 const RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const DC_NS = "http://purl.org/dc/elements/1.1/";
 
 type Kind = "jpeg" | "png" | "unsupported";
-type ToolMode = "write" | "detect";
 type XmpLocation = { start: number; end: number; xml: string; compressed?: boolean };
 type FileStatus = "ready" | "already" | "unsupported" | "protected" | "done" | "error";
 type FileItem = { id: string; file: File; bytes: Uint8Array; format: Kind; location?: XmpLocation; status: FileStatus; detail: string; output?: Uint8Array };
@@ -16,11 +17,11 @@ type FileItem = { id: string; file: File; bytes: Uint8Array; format: Kind; locat
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const structuredData = JSON.stringify({ "@context": "https://schema.org", "@graph": [
-  { "@type": "SoftwareApplication", name: "亚马逊 AI 图片合规标记工具", applicationCategory: "BusinessApplication", operatingSystem: "Web", browserRequirements: "需要 JavaScript，支持 JPG 与 PNG 文件。", description: "面向 Amazon 卖家的浏览器本地工具，可检测或写入适用图片的 contains-synthetic-performer XMP 标记。", offers: { "@type": "Offer", price: "0", priceCurrency: "USD" }, isAccessibleForFree: true },
+  { "@type": "SoftwareApplication", name: "Amazon AI Image Tagger", applicationCategory: "BusinessApplication", operatingSystem: "Web", browserRequirements: "需要 JavaScript，支持 JPG 与 PNG 文件。", description: "面向 Amazon 卖家的浏览器本地工具，为符合条件的图片检查、写入并验证 contains-synthetic-performer XMP dc:subject 标签；图片像素不会被重新编码。", offers: { "@type": "Offer", price: "0", priceCurrency: "USD" }, isAccessibleForFree: true },
   { "@type": "FAQPage", mainEntity: [
     { "@type": "Question", name: "contains-synthetic-performer 是什么？Amazon 为什么要求添加？", acceptedAnswer: { "@type": "Answer", text: "这是 Amazon 要求写入的 XMP 披露关键词。符合条件的商品详情页或 A+ 内容图片在上传前需要添加它，用来说明其中有逼真且完全由 AI 生成人物。" } },
     { "@type": "Question", name: "哪些图片需要标记？AI 修改过的真人图片也需要吗？", acceptedAnswer: { "@type": "Answer", text: "图片中有逼真且完全由 AI 生成人物时，就需要添加。Amazon 说明：只用 AI 修改的真人、没有人物的图片，以及非写实角色或插画，通常不需要。是否适用仍由卖家判断。" } },
-    { "@type": "Question", name: "工具把标签写入哪个元数据字段？", acceptedAnswer: { "@type": "Answer", text: "工具会把每个输入的关键词写入 XMP dc:subject / rdf:Bag 的 rdf:li 值中。勾选保留原有标记时，只追加缺失值并避免重复写入。" } },
+    { "@type": "Question", name: "工具把标签写入哪个元数据字段？", acceptedAnswer: { "@type": "Answer", text: "工具会把固定的目标标签写入 XMP dc:subject / rdf:Bag 的 rdf:li 值中，并保留现有值，只追加缺失的目标标签。" } },
     { "@type": "Question", name: "如何确认下载后的文件已正确写入？", acceptedAnswer: { "@type": "Answer", text: "写入后，工具会重新读取生成的文件。找到所需 XMP 值后，文件才会标记为已验证。也可以把下载后的 JPG 或 PNG 再添加到本页检查一次。" } }
   ] }
 ] });
@@ -34,12 +35,6 @@ function concat(parts: Uint8Array[]) {
 
 function blobPart(bytes: Uint8Array) {
   return new Uint8Array(bytes).buffer;
-}
-
-function kindOf(bytes: Uint8Array): Kind {
-  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "jpeg";
-  if (bytes.slice(0, 8).every((value, i) => value === [137, 80, 78, 71, 13, 10, 26, 10][i])) return "png";
-  return "unsupported";
 }
 
 function findJpegXmp(bytes: Uint8Array): XmpLocation | undefined {
@@ -84,10 +79,6 @@ function findPngXmp(bytes: Uint8Array): XmpLocation | undefined {
   }
 }
 
-function parseTags(value: string) {
-  return [...new Set(value.split(",").map(tag => tag.trim()).filter(Boolean))];
-}
-
 function hasXmpTags(xml: string, tags: string[]) {
   if (!xml || !tags.length) return false;
   const doc = new DOMParser().parseFromString(xml, "application/xml");
@@ -106,7 +97,7 @@ function defaultXmp(tags: string[]) {
   return `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="${RDF_NS}"><rdf:Description rdf:about="" xmlns:dc="${DC_NS}"><dc:subject><rdf:Bag>${tags.map(tag => `<rdf:li>${escapeXml(tag)}</rdf:li>`).join("")}</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
 }
 
-function addTags(xml: string, tags: string[], preserveExisting: boolean) {
+function addTags(xml: string, tags: string[]) {
   if (!tags.length) throw new Error("请至少输入一个要写入的标记。 ");
   if (!xml) return { xml: defaultXmp(tags), changed: true };
   const doc = new DOMParser().parseFromString(xml, "application/xml");
@@ -129,11 +120,9 @@ function addTags(xml: string, tags: string[], preserveExisting: boolean) {
     subject.appendChild(bag);
   }
   const existing = Array.from(bag.getElementsByTagNameNS(RDF_NS, "li")).map(item => item.textContent?.trim() ?? "");
-  if (!preserveExisting && existing.length === tags.length && existing.every((tag, index) => tag === tags[index])) return { xml, changed: false };
-  if (preserveExisting && tags.every(tag => existing.includes(tag))) return { xml, changed: false };
-  if (!preserveExisting) while (bag.firstChild) bag.removeChild(bag.firstChild);
+  if (tags.every(tag => existing.includes(tag))) return { xml, changed: false };
   for (const tag of tags) {
-    if (preserveExisting && existing.includes(tag)) continue;
+    if (existing.includes(tag)) continue;
     const item = doc.createElementNS(RDF_NS, "rdf:li");
     item.textContent = tag;
     bag.appendChild(item);
@@ -201,47 +190,7 @@ function zipFiles(entries: Array<{ name: string; bytes: Uint8Array }>) {
 
 type Translate = (en: string, zh: string) => string;
 
-type ToolTabsProps = {
-  mode: ToolMode;
-  onModeChange: (mode: ToolMode) => void;
-  t: Translate;
-};
-
-function ToolTabs({ mode, onModeChange, t }: ToolTabsProps) {
-  return <div className="tool-tabs" role="tablist" aria-label={t("Tool mode", "工具模式")}>
-    <button role="tab" aria-selected={mode === "write"} className={mode === "write" ? "active" : ""} onClick={() => onModeChange("write")}>{t("Add XMP tag", "添加 XMP 标签")}</button>
-    <button role="tab" aria-selected={mode === "detect"} className={mode === "detect" ? "active" : ""} onClick={() => onModeChange("detect")}>{t("Check XMP tag", "检测 XMP 标签")}</button>
-  </div>;
-}
-
-type TagSettingsProps = {
-  mode: ToolMode;
-  tagValue: string;
-  tags: string[];
-  preserveExisting: boolean;
-  onTagValueChange: (value: string) => void;
-  onPreserveExistingChange: (checked: boolean) => void;
-  t: Translate;
-};
-
-function TagSettings({ mode, tagValue, tags, preserveExisting, onTagValueChange, onPreserveExistingChange, t }: TagSettingsProps) {
-  const isDetecting = mode === "detect";
-  return <section className="workspace-panel">
-    <div className="panel-head"><b>01</b><h3>{isDetecting ? t("Tag to check", "检测设置") : t("Tag settings", "标签设置")}</h3></div>
-    <div className="tag-settings">
-      <label className="keyword-field">
-        <span>{isDetecting ? t("Tag to check (separate multiple values with commas)", "要检测的标签（多个用英文逗号分隔）") : t("Keyword to write (separate multiple values with commas)", "要写入的标记（多个用英文逗号分隔）")}</span>
-        <input value={tagValue} onChange={event => onTagValueChange(event.target.value)} aria-label={isDetecting ? t("XMP tag to check", "要检测的 XMP 标签") : t("XMP keyword to write", "要写入的 XMP 标记")} aria-describedby="tag-warning" />
-      </label>
-      <p id="tag-warning">{isDetecting ? t("The exact value is matched against XMP dc:subject.", "会在 XMP dc:subject 中精确匹配该值。") : <>{t("Keep the default value. ", "建议保持默认值。")}<strong>{t("A single wrong character can prevent Amazon from reading it.", "写错一个字符，Amazon 就可能无法读取。")}</strong></>}</p>
-      {!tags.length && <p className="input-error">{isDetecting ? t("Enter at least one tag to check.", "请至少输入一个要检测的标签。") : t("Enter at least one keyword before writing.", "请至少输入一个标记后再写入。")}</p>}
-      {!isDetecting && <label className="preserve-setting"><input type="checkbox" checked={preserveExisting} onChange={event => onPreserveExistingChange(event.target.checked)} /><span>{t("Keep existing tags and append the new one", "保留原有的标记，只追加新的")}</span></label>}
-    </div>
-  </section>;
-}
-
 type FilePickerProps = {
-  mode: ToolMode;
   itemCount: number;
   fileInput: React.RefObject<HTMLInputElement | null>;
   folderInput: React.RefObject<HTMLInputElement | null>;
@@ -250,53 +199,50 @@ type FilePickerProps = {
   t: Translate;
 };
 
-function FilePicker({ mode, itemCount, fileInput, folderInput, onFilesSelected, onDrop, t }: FilePickerProps) {
-  const isDetecting = mode === "detect";
+function FilePicker({ itemCount, fileInput, folderInput, onFilesSelected, onDrop, t }: FilePickerProps) {
   return <section className="workspace-panel">
-    <div className="panel-head"><b>02</b><h3>{isDetecting ? t("Upload images", "上传图片") : t("Choose images", "选择图片")}</h3><span className="count">{itemCount ? t(`${itemCount} file${itemCount === 1 ? "" : "s"} selected`, `已选择 ${itemCount} 个文件`) : t("No files selected", "未选择文件")}</span></div>
+    <div className="panel-head"><b>01</b><h3>{t("Upload images", "上传图片")}</h3><span className="count">{itemCount ? t(`${itemCount} file${itemCount === 1 ? "" : "s"} selected`, `已选择 ${itemCount} 个文件`) : t("No files selected", "未选择文件")}</span></div>
     <input ref={fileInput} onChange={onFilesSelected} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" multiple hidden />
     <input ref={folderInput} onChange={onFilesSelected} accept="image/jpeg,image/png,.jpg,.jpeg,.png" type="file" multiple hidden />
     <div className="batch-dropzone" onDragOver={event => event.preventDefault()} onDrop={onDrop}>
       <span className="upload-mark">↑</span>
-      <strong>{isDetecting ? t("Drop images or a folder to check", "把要检测的图片或整个文件夹拖到这里") : t("Drop images or a folder here", "把图片或整个文件夹拖到这里")}</strong>
-      <small>{isDetecting ? t("JPG or PNG · select multiple files or a folder · files are checked locally only", "JPG 或 PNG · 可选择多个文件或整个文件夹 · 只在本地检测") : t("JPG or PNG · select multiple files or a folder · files are never uploaded", "JPG 或 PNG · 可选择多个文件或整个文件夹 · 文件始终留在浏览器中")}</small>
+      <strong>{t("Drop images or a folder here", "把图片或整个文件夹拖到这里")}</strong>
+      <small>{t("JPG or PNG · select multiple files or a folder · metadata is checked locally", "JPG 或 PNG · 可选择多个文件或整个文件夹 · 在本地检查元数据")}</small>
       <div className="choose-row"><button className="choose-file" onClick={() => fileInput.current?.click()}>{t("Choose files", "选择文件")}</button><button className="choose-file" onClick={() => folderInput.current?.click()}>{t("Choose folder", "选择文件夹")}</button></div>
     </div>
-    <p className="fine-print">{isDetecting ? t("Files are read locally and are never changed or uploaded.", "文件只会在浏览器中读取，不会被修改或上传。") : t("Choose the exported images after cropping, compression, and retouching are complete.", "请在裁剪、压缩和修图完成后，再选择导出的图片文件。")}</p>
+    <p className="fine-print">{t("The fixed contains-synthetic-performer tag is checked automatically. Files are never uploaded.", "会自动检查固定的 contains-synthetic-performer 标签；文件不会上传。")}</p>
   </section>;
 }
 
 type ResultsPanelProps = {
-  mode: ToolMode;
-  tags: string[];
   items: FileItem[];
-  workflowItems: FileItem[];
+  pendingItems: FileItem[];
+  existingItems: FileItem[];
   unavailableItems: FileItem[];
-  readyCount: number;
   completedCount: number;
-  canProcess: boolean;
   statusLabel: (status: FileStatus) => string;
   fileDetail: (item: FileItem) => string;
   onProcess: () => void;
   onDownloadZip: () => void;
-  onDownloadFile: (item: FileItem) => void;
   onClear: () => void;
   t: Translate;
 };
 
-function ResultsPanel({ mode, tags, items, workflowItems, unavailableItems, readyCount, completedCount, canProcess, statusLabel, fileDetail, onProcess, onDownloadZip, onDownloadFile, onClear, t }: ResultsPanelProps) {
-  const isDetecting = mode === "detect";
-  const count = isDetecting ? t(`${workflowItems.length} checked`, `已检测 ${workflowItems.length} 个`) : readyCount ? t(`${readyCount} ready to tag`, `${readyCount} 个待写入`) : t(`${completedCount} verified`, `已验证 ${completedCount} 个`);
+function ResultsPanel({ items, pendingItems, existingItems, unavailableItems, completedCount, statusLabel, fileDetail, onProcess, onDownloadZip, onClear, t }: ResultsPanelProps) {
+  const downloadableCount = completedCount + existingItems.length;
+  const listedItems = items.filter(item => item.status === "ready" || item.status === "done");
+  const count = pendingItems.length ? t(`${pendingItems.length} pending tag`, `${pendingItems.length} 个待写入标签`) : downloadableCount > 0 ? t(`${downloadableCount} files complete`, `已完成：${downloadableCount} 个图片`) : t("No pending tags", "没有待写入标签的图片");
   return <section id="write-download" className="workspace-panel">
-    <div className="panel-head"><b>03</b><h3>{isDetecting ? t("Detection results", "检测结果") : t("Write and download", "写入并下载")}</h3><span className="count">{count}</span></div>
+    <div className="panel-head"><b>02</b><h3>{t("Detect and write", "检测与写入")}</h3><span className="count">{count}</span></div>
     <div className="action-row">
-      <button className="primary" onClick={onProcess} disabled={!canProcess || !tags.length}>{isDetecting ? t("Check tags", "检测标签") : t("Write tags and verify", "写入并验证")}</button>
-      {!isDetecting && <button className="secondary" onClick={onDownloadZip} disabled={!completedCount}>{t("Download ZIP", "下载 ZIP")}</button>}
+      {pendingItems.length > 0 && <button className="primary" onClick={onProcess}>{t("Process and download", "写入并下载")}</button>}
+      {pendingItems.length === 0 && downloadableCount > 0 && <button className="primary" onClick={onDownloadZip}>{t("Download files", "下载文件")}</button>}
       <button className="text-button" onClick={onClear} disabled={!items.length}>{t("Clear", "清空")}</button>
     </div>
+    {existingItems.length > 0 && <details className="unavailable-files"><summary>{t(`${existingItems.length} file${existingItems.length === 1 ? "" : "s"} with an existing tag`, `${existingItems.length} 个文件已有标签`)}</summary><div>{existingItems.map(item => <div className="unavailable-row" key={item.id}><div><strong>{item.file.name}</strong><small>{fileDetail(item)}</small></div><span className={`file-status ${item.status}`}>{statusLabel(item.status)}</span></div>)}</div></details>}
     {unavailableItems.length > 0 && <details className="unavailable-files"><summary>{t(`${unavailableItems.length} file${unavailableItems.length === 1 ? "" : "s"} not available for processing`, `${unavailableItems.length} 个文件无法处理`)}</summary><div>{unavailableItems.map(item => <div className="unavailable-row" key={item.id}><div><strong>{item.file.name}</strong><small>{fileDetail(item)}</small></div><span className={`file-status ${item.status}`}>{statusLabel(item.status)}</span></div>)}</div></details>}
     <div className="file-list" aria-live="polite">
-      {workflowItems.length ? workflowItems.map(item => <div className="file-row" key={item.id}><div><strong>{item.file.name}</strong><small>{fileDetail(item)}</small></div><span className={`file-status ${item.status}`}>{statusLabel(item.status)}</span>{!isDetecting && item.output && <button className="download-one" onClick={() => onDownloadFile(item)}>{t("Download", "下载")}</button>}</div>) : <p className="empty-state">{items.length ? t("No selected files can be processed.", "没有可处理的图片。") : isDetecting ? t("Choose images and their XMP tag status appears here.", "选择图片后，这里会显示每张图片的标签检测结果。") : t("After you choose images, each file's writing status appears here.", "选择图片后，会在这里逐条显示写入状态")}</p>}
+      {listedItems.length ? listedItems.map(item => <div className="file-row" key={item.id}><div><strong>{item.file.name}</strong><small>{fileDetail(item)}</small></div><span className={`file-status ${item.status}`}>{statusLabel(item.status)}</span></div>) : !items.length && <p className="empty-state">{t("Choose images to inspect their fixed target-tag status.", "选择图片后会自动检查固定标签的状态。")}</p>}
     </div>
   </section>;
 }
@@ -308,9 +254,6 @@ export default function Home() {
   const uploadSession = useRef(0);
   const [items, setItems] = useState<FileItem[]>([]);
   const [language, setLanguage] = useState<"en" | "zh">("zh");
-  const [mode, setMode] = useState<ToolMode>("write");
-  const [tagValue, setTagValue] = useState(DEFAULT_TAG);
-  const [preserveExisting, setPreserveExisting] = useState(true);
   const [toast, setToast] = useState<string>();
   const [showBackToTop, setShowBackToTop] = useState(false);
   const zhCopy: Record<string, string> = {
@@ -338,11 +281,10 @@ export default function Home() {
     "Amazon 的公开公告重点说明新上传内容的合规要求。对于既有媒体，请在编辑或重新上传 Listing 时查看最新 Seller Central 指引；本工具不会判断旧素材的政策义务。": "Amazon 的公开公告重点说明新上传内容的要求。已上传的图片如果需要编辑或重新上传，请查看最新的 Seller Central 指引；本工具无法判断旧图片是否必须补写。"
   };
   const t = (en: string, zh: string) => language === "zh" ? (zhCopy[zh] ?? zh) : en;
-  const tags = parseTags(tagValue);
-  const ready = items.filter(item => item.status === "ready").length;
+  const tags = [DEFAULT_TAG];
   const completed = items.filter(item => item.output).length;
-  const canProcess = items.some(item => item.status !== "unsupported" && item.status !== "protected" && item.status !== "error");
-  const workflowItems = items.filter(item => item.status !== "unsupported" && item.status !== "protected" && item.status !== "error");
+  const pendingItems = items.filter(item => item.status === "ready");
+  const existingItems = items.filter(item => item.status === "already");
   const unavailableItems = items.filter(item => item.status === "unsupported" || item.status === "protected" || item.status === "error");
 
   useEffect(() => { folderInput.current?.setAttribute("webkitdirectory", ""); folderInput.current?.setAttribute("directory", ""); }, []);
@@ -358,12 +300,12 @@ export default function Home() {
     const incoming = await Promise.all(files.map(async file => {
       const id = `${file.name}-${file.lastModified}-${Math.random()}`;
       try {
-        const bytes = new Uint8Array(await file.arrayBuffer()); const format = kindOf(bytes);
-        if (format === "unsupported") return { id, file, bytes, format, status: "unsupported" as const, detail: "Unsupported format" };
-        const location = format === "jpeg" ? findJpegXmp(bytes) : findPngXmp(bytes);
-        if (location?.compressed) return { id, file, bytes, format, location, status: "protected" as const, detail: "Compressed PNG XMP" };
-        if (location?.xml && hasXmpTags(location.xml, tags)) return { id, file, bytes, format, location, status: "already" as const, detail: "Tag already found" };
-        return { id, file, bytes, format, location, status: "ready" as const, detail: location ? "Ready to append tag" : "Ready to add XMP" };
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const inspection = inspectImageMetadata(bytes);
+        if (inspection.status === "existing") return { id, file, bytes, format: inspection.format, location: inspection.location, status: "already" as const, detail: inspection.detail };
+        if (inspection.status === "pending") return { id, file, bytes, format: inspection.format, location: inspection.location, status: "ready" as const, detail: inspection.detail };
+        const status = inspection.detail === "Unsupported format" ? "unsupported" as const : inspection.detail === "Compressed PNG XMP" ? "protected" as const : "error" as const;
+        return { id, file, bytes, format: inspection.format, location: inspection.location, status, detail: inspection.detail };
       } catch {
         return { id, file, bytes: new Uint8Array(), format: "unsupported" as const, status: "error" as const, detail: "File could not be read. Choose it again." };
       }
@@ -372,58 +314,56 @@ export default function Home() {
     setItems(current => [...current, ...incoming]);
     const readable = incoming.filter(item => item.status !== "error").length;
     if (readable) {
-      setToast(mode === "detect" ? t(`${readable} file${readable === 1 ? "" : "s"} checked.`, `已检测 ${readable} 个文件。`) : t(`${readable} file${readable === 1 ? "" : "s"} added. Continue with Write and download.`, `已加入 ${readable} 个文件。请继续“写入并下载”。`));
+      setToast(t(`${readable} file${readable === 1 ? "" : "s"} inspected for the fixed target tag.`, `已自动检查 ${readable} 个文件的固定标签。`));
       window.clearTimeout(toastTimer.current); toastTimer.current = window.setTimeout(() => setToast(undefined), 5000);
-      window.setTimeout(() => document.getElementById("write-download")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+      window.setTimeout(() => {
+        const results = document.getElementById("write-download");
+        if (!results) return;
+        window.scrollTo({ top: Math.max(0, results.getBoundingClientRect().top + window.scrollY - 120), behavior: "smooth" });
+      }, 120);
     }
   }
   async function selectFiles(event: ChangeEvent<HTMLInputElement>) { const files = Array.from(event.target.files ?? []); if (files.length) await addFiles(files); event.target.value = ""; }
   function dropFiles(event: React.DragEvent<HTMLDivElement>) { event.preventDefault(); const files = Array.from(event.dataTransfer.files); if (files.length) void addFiles(files); }
   function processAll() {
-    if (!tags.length) return;
-    if (mode === "detect") {
-      setItems(current => current.map(item => {
-        if (item.status === "unsupported" || item.status === "protected" || item.status === "error") return item;
-        const found = hasXmpTags(item.location?.xml ?? "", tags);
-        return { ...item, status: found ? "already" as const : "ready" as const, output: undefined };
-      }));
-      return;
-    }
-    setItems(current => current.map(item => {
-      if (item.status === "unsupported" || item.status === "protected" || item.status === "error") return item;
+    const processed = items.map(item => {
+      if (item.status !== "ready") return item;
       try {
-        const next = addTags(item.location?.xml ?? "", tags, preserveExisting); const output = next.changed ? replace(item.bytes, item.location, item.format === "jpeg" ? jpegSegment(next.xml) : pngXmp(next.xml), item.format) : item.bytes;
+        const next = addTags(item.location?.xml ?? "", tags); const output = next.changed ? replace(item.bytes, item.location, item.format === "jpeg" ? jpegSegment(next.xml) : pngXmp(next.xml), item.format) : item.bytes;
         const verification = item.format === "jpeg" ? findJpegXmp(output) : findPngXmp(output);
         if (!verification || !hasXmpTags(verification.xml, tags)) throw new Error("Write verification failed");
         return { ...item, status: "done" as const, detail: next.changed ? "Tagged and verified" : "Already tagged and verified", output };
       } catch (error) { return { ...item, status: "error" as const, detail: error instanceof Error ? error.message : "Unable to write tag" }; }
-    }));
+    });
+    setItems(processed);
+    downloadZip(processed);
   }
-  function download(item: FileItem) {
-    if (!item.output) return; const extension = item.format === "jpeg" ? "jpg" : "png"; const name = `${item.file.name.replace(/\.[^.]+$/, "")}-synthetic-performer.${extension}`;
-    const url = URL.createObjectURL(new Blob([blobPart(item.output)], { type: item.format === "jpeg" ? "image/jpeg" : "image/png" })); const link = document.createElement("a"); link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url);
+  function downloadZip(sourceItems = items) {
+    const candidates: DownloadCandidate[] = sourceItems.map(item => {
+      if (item.status === "done" && item.output) return { name: item.file.name, bytes: item.output, status: "processed" };
+      if (item.status === "already") return { name: item.file.name, bytes: item.bytes, status: "existing" };
+      return { name: item.file.name, bytes: item.bytes, status: "unavailable" };
+    });
+    const entries = createDownloadSet(candidates);
+    if (!entries.length) return;
+    const zip = zipFiles(entries);
+    const url = URL.createObjectURL(new Blob([blobPart(zip)], { type: "application/zip" })); const link = document.createElement("a"); link.href = url; link.download = downloadZipFilename(new Date()); link.click(); URL.revokeObjectURL(url);
   }
-  function downloadZip() { const files = items.filter((item): item is FileItem & { output: Uint8Array } => Boolean(item.output)); if (!files.length) return; const names = new Map<string, number>(); const zip = zipFiles(files.map(item => { const base = `${item.file.name.replace(/\.[^.]+$/, "")}-synthetic-performer.${item.format === "jpeg" ? "jpg" : "png"}`; const count = names.get(base) ?? 0; names.set(base, count + 1); return { name: count ? base.replace(/(\.[^.]+)$/, `-${count + 1}$1`) : base, bytes: item.output }; })); const url = URL.createObjectURL(new Blob([blobPart(zip)], { type: "application/zip" })); const link = document.createElement("a"); link.href = url; link.download = "amazon-synthetic-performer-tagged.zip"; link.click(); URL.revokeObjectURL(url); }
-  function switchMode(next: ToolMode) { uploadSession.current += 1; setMode(next); setItems([]); }
-  const statusLabel = (status: FileStatus) => ({ ready: mode === "detect" ? t("Tag not found", "未找到标签") : t("Ready", "待处理"), already: mode === "detect" ? t("Tag found", "已找到标签") : t("Already tagged", "已存在标签"), unsupported: t("Unsupported", "不支持"), protected: t("Protected XMP", "受保护的 XMP"), done: t("Verified", "已验证"), error: t("Error", "错误") })[status];
-  const fileDetail = (item: FileItem) => ({ ready: mode === "detect" ? t("The requested XMP tag was not found", "未检测到所填的 XMP 标签") : t("Ready to add the Amazon tag", "待写入 Amazon 标签"), already: mode === "detect" ? t("The requested XMP tag was found", "已检测到所填的 XMP 标签") : t("Amazon tag already found", "已检测到 Amazon 标签"), unsupported: t("This format is not supported", "不支持此文件格式"), protected: t("Compressed PNG XMP is not changed", "不会修改压缩 PNG XMP"), done: t("Tag written and read back successfully", "标签写入后已成功读回验证"), error: t("File could not be read. Choose it again.", "无法读取文件，请重新选择。") })[item.status];
+  const statusLabel = (status: FileStatus) => ({ ready: t("Pending tag", "待写入标签"), already: t("Existing tag", "已有标签"), unsupported: t("Unsupported", "不支持"), protected: t("Protected XMP", "受保护的 XMP"), done: t("Verified", "已验证"), error: t("Unavailable", "无法处理") })[status];
+  const fileDetail = (item: FileItem) => ({ ready: t("The fixed Amazon tag is missing", "未找到固定的 Amazon 标签"), already: t("The fixed Amazon tag was found", "已找到固定的 Amazon 标签"), unsupported: t("This format is not supported", "不支持此文件格式"), protected: t("Compressed PNG XMP is not changed", "不会修改压缩 PNG XMP"), done: t("Tag written and read back successfully", "标签写入后已成功读回验证"), error: item.detail === "Unreadable XMP" ? t("XMP metadata could not be read safely", "无法安全读取 XMP 元数据") : t("File could not be read. Choose it again.", "无法读取文件，请重新选择。") })[item.status];
 
   return <main id="top">
-    <header className="site-header"><a href="#tool" className="brand">AMZ <span>Tagger</span></a><nav><a href="#guide">{t("Guide", "说明")}</a><a href="#faq">FAQ</a><button className="language" onClick={() => setLanguage(language === "en" ? "zh" : "en")}>{language === "en" ? "中文" : "EN"}</button></nav></header>
-    <section className="hero hero-batch"><p className="eyebrow">{t("AMAZON COMPLIANCE METADATA · LOCAL PROCESSING", "AMAZON 合规元数据 · 本地处理")}</p><h1>{t("Batch-add contains-synthetic-performer", "批量写入 contains-synthetic-performer")}</h1><p className="lead">{language === "zh" ? <>批量写入 Amazon 要求的 <strong>XMP dc:subject</strong> 合规标记。支持 JPG、PNG 商品图和 A+ 内容图片。</> : <>Batch-write Amazon&apos;s required <strong>XMP dc:subject</strong> compliance tag for JPG / PNG product and A+ content images.</>}</p><div className="format-row"><span>JPG</span><span>PNG</span><span>{t("Batch processing", "批量处理")}</span></div><div className="privacy-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9 12l2 2 4-4" /></svg><span>{t("Your files stay entirely in this browser", "文件全程留在本地浏览器")}</span><em>{t("Never uploaded to any server", "不上传任何服务器")}</em></div></section>
+    <header className="site-header"><a href="#tool" className="brand">Amazon AI <span>Image Tagger</span></a><nav><a href="#guide">{t("Guide", "说明")}</a><a href="#faq">FAQ</a><button className="language" onClick={() => setLanguage(language === "en" ? "zh" : "en")}>{language === "en" ? "中文" : "EN"}</button></nav></header>
+    <section className="hero hero-batch"><h1>{t("Amazon AI Image Tagger", "为 Amazon AI 人物图片写入合规标签")}</h1><div className="privacy-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9 12l2 2 4-4" /></svg><span>{t("Your files stay local and are never uploaded", "文件仅在本地处理，不会上传")}</span></div><p className="pixel-note">{t("JPG and PNG pixels are never decoded or re-encoded", "JPG 和 PNG 像素不会被解码或重新编码")}</p></section>
     <section id="tool" className="workflow" aria-labelledby="workflow-heading">
       <div className="workflow-intro">
-        <p className="eyebrow">{t("ONE AMAZON-SPECIFIC WORKFLOW", "单一 AMAZON 合规流程")}</p>
-        <h2 id="workflow-heading">{mode === "detect" ? t("Check an existing XMP tag", "检测现有 XMP 标签") : t("Write one exact tag. Verify every result.", "写入一个精确标签，逐个验证结果。")}</h2>
-        <p>{mode === "detect" ? t("Inspect JPG and PNG files locally. Nothing is written or downloaded in this mode.", "在浏览器本地检查 JPG 和 PNG 文件；此模式不会写入或下载文件。") : t("This is not a general metadata editor. It is purpose-built for the Amazon synthetic-performer disclosure workflow.", "这不是通用元数据编辑器；它只服务于 Amazon synthetic-performer 披露流程。")}</p>
+        <h2 id="workflow-heading">{t("Upload images. Detect and write the compliance tag.", "上传图片，检测并写入合规标签。")}</h2>
       </div>
-      <ToolTabs mode={mode} onModeChange={switchMode} t={t} />
-      <TagSettings mode={mode} tagValue={tagValue} tags={tags} preserveExisting={preserveExisting} onTagValueChange={setTagValue} onPreserveExistingChange={setPreserveExisting} t={t} />
-      <FilePicker mode={mode} itemCount={items.length} fileInput={input} folderInput={folderInput} onFilesSelected={selectFiles} onDrop={dropFiles} t={t} />
-      <ResultsPanel mode={mode} tags={tags} items={items} workflowItems={workflowItems} unavailableItems={unavailableItems} readyCount={ready} completedCount={completed} canProcess={canProcess} statusLabel={statusLabel} fileDetail={fileDetail} onProcess={processAll} onDownloadZip={downloadZip} onDownloadFile={download} onClear={() => setItems([])} t={t} />
+      <FilePicker itemCount={items.length} fileInput={input} folderInput={folderInput} onFilesSelected={selectFiles} onDrop={dropFiles} t={t} />
+      <ResultsPanel items={items} pendingItems={pendingItems} existingItems={existingItems} unavailableItems={unavailableItems} completedCount={completed} statusLabel={statusLabel} fileDetail={fileDetail} onProcess={processAll} onDownloadZip={() => downloadZip()} onClear={() => setItems([])} t={t} />
     </section>
     <section id="guide" className="rule-section"><div><p className="eyebrow">{t("USE THE TAG ONLY WHEN IT APPLIES", "仅在适用时添加标签")}</p><h2>{t("Which Amazon images need the tag?", "哪些 Amazon 图片需要此标签？")}</h2><p>{t("Amazon describes a metadata disclosure for images that feature a photorealistic person generated entirely by AI. This tool cannot decide whether an image meets that condition.", "Amazon 对“包含逼真且完全由 AI 生成的人物”的图片规定了元数据披露。本工具无法判断图片是否满足该条件。")}</p><a className="text-link" href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">{t("Read Amazon's current guidance", "查看 Amazon 最新指引")} ↗</a></div><div className="decision-table"><div className="decision-head"><span>{t("Image situation", "图片情况")}</span><span>{t("Add tag?", "需要添加？")}</span></div><div><span>{t("Photorealistic person generated entirely by AI", "逼真且完全由 AI 生成人物")}</span><b className="yes">{t("Yes", "是")}</b></div><div><span>{t("Real person altered with AI tools", "使用 AI 修改的真实人物")}</span><b>{t("No", "否")}</b></div><div><span>{t("AI-generated product or background with no person", "无人像的 AI 商品或背景图")}</span><b>{t("No", "否")}</b></div><div><span>{t("Cartoon, illustration, or non-photorealistic person", "卡通、插画或非写实人物")}</span><b>{t("No", "否")}</b></div></div></section>
-    <section id="faq" className="faq"><p className="eyebrow">{t("FAQ", "常见问题")}</p><h2>{t("Questions sellers ask before tagging", "打标前最常见的问题")}</h2><details open><summary>{t("What is contains-synthetic-performer, and why does Amazon require it?", "contains-synthetic-performer 是什么？Amazon 为什么要求添加？")}</summary><p>{t("It is the exact XMP disclosure keyword Amazon instructs sellers to add before uploading applicable Listing or A+ media. Amazon says it helps show customers when media includes a photorealistic person generated entirely by AI.", "它是 Amazon 要求卖家写入的精确 XMP 披露关键词，适用于符合条件的 Listing 或 A+ 媒体。Amazon 表示，该标记用于向消费者披露媒体中包含逼真且完全由 AI 生成人物。")}</p></details><details open><summary>{t("Which images need the tag? Do AI-edited real-person images need it?", "哪些图片需要标记？AI 修改过的真人图片也需要吗？")}</summary><p>{t("Use it when the final media includes a photorealistic person generated entirely by AI. Amazon says it is not required for real people merely altered with AI, media with no people, or non-photorealistic characters and illustrations. You remain responsible for the final eligibility decision.", "当最终媒体包含逼真且完全由 AI 生成人物时使用。Amazon 说明：仅使用 AI 修改的真人、没有人物的媒体，以及非写实角色或插画通常不需要。最终是否适用仍由卖家判断。")}</p></details><details open><summary>{t("Which metadata field does this tool write?", "工具把标签写入哪个元数据字段？")}</summary><p>{t("The tool writes each requested keyword as an rdf:li value inside XMP dc:subject / rdf:Bag. With “keep existing tags” enabled, it appends only missing values and avoids duplicate entries.", "工具会把每个输入的关键词写入 XMP dc:subject / rdf:Bag 的 rdf:li 值中。勾选“保留原有的标记”时，只追加缺失值并避免重复写入。")}</p></details><details open><summary>{t("Will tagging change image quality, dimensions, or visible pixels?", "写入标签会改变画质、尺寸或图片像素吗？")}</summary><p>{t("No. JPG and PNG pixels are not decoded or re-encoded. The tool changes only the XMP metadata packet, so it does not add a visible label, watermark, or text to the image.", "不会。JPG 和 PNG 像素不会被解码或重新编码；工具只修改 XMP 元数据包，不会在画面中添加可见标签、水印或文字。")}</p></details><details open><summary>{t("How do I know the downloaded file was written correctly?", "如何确认下载后的文件已正确写入？")}</summary><p>{t("After writing, the tool reads the generated bytes again and marks a file “Verified” only when the requested XMP value is found. You can also add the downloaded JPG or PNG back to this page for another local check.", "写入后，工具会重新读取生成文件的字节；只有找到所需 XMP 值时才标记为“已验证”。也可以把下载后的 JPG 或 PNG 重新添加到本页，再做一次本地检查。")}</p></details><details open><summary>{t("Why is my file unavailable for processing?", "为什么我的文件无法处理？")}</summary><p>{t("This version deliberately supports only JPG and PNG XMP structures that it can write and verify in the browser. Unsupported, protected, or unreadable files are placed in a collapsed notice list and are not included in the write flow.", "当前版本只支持能在浏览器中安全写入并验证 XMP 的 JPG 和 PNG 结构。不支持、受保护或无法读取的文件会放入可收起的提示列表，不会进入写入流程。")}</p></details><details open><summary>{t("Do older uploaded images need to be updated?", "此前已上传的图片需要补写标签吗？")}</summary><p>{t("Amazon's public announcement focuses on compliance for new uploads. For existing media, review the current Seller Central guidance when you edit or re-upload a listing; this tool does not determine policy obligations for older assets.", "Amazon 的公开公告重点说明新上传内容的合规要求。对于既有媒体，请在编辑或重新上传 Listing 时查看最新 Seller Central 指引；本工具不会判断旧素材的政策义务。")}</p></details></section>
+    <section id="faq" className="faq"><p className="eyebrow">{t("FAQ", "常见问题")}</p><h2>{t("Questions sellers ask before tagging", "打标前最常见的问题")}</h2><details open><summary>{t("What is contains-synthetic-performer, and why does Amazon require it?", "contains-synthetic-performer 是什么？Amazon 为什么要求添加？")}</summary><p>{t("It is the exact XMP disclosure keyword Amazon instructs sellers to add before uploading applicable Listing or A+ media. Amazon says it helps show customers when media includes a photorealistic person generated entirely by AI.", "它是 Amazon 要求卖家写入的精确 XMP 披露关键词，适用于符合条件的 Listing 或 A+ 媒体。Amazon 表示，该标记用于向消费者披露媒体中包含逼真且完全由 AI 生成人物。")}</p></details><details open><summary>{t("Which images need the tag? Do AI-edited real-person images need it?", "哪些图片需要标记？AI 修改过的真人图片也需要吗？")}</summary><p>{t("Use it when the final media includes a photorealistic person generated entirely by AI. Amazon says it is not required for real people merely altered with AI, media with no people, or non-photorealistic characters and illustrations. You remain responsible for the final eligibility decision.", "当最终媒体包含逼真且完全由 AI 生成人物时使用。Amazon 说明：仅使用 AI 修改的真人、没有人物的媒体，以及非写实角色或插画通常不需要。最终是否适用仍由卖家判断。")}</p></details><details open><summary>{t("Which metadata field does this tool write?", "工具把标签写入哪个元数据字段？")}</summary><p>{t("The tool writes the fixed target tag as an rdf:li value inside XMP dc:subject / rdf:Bag. It preserves existing values and appends the target tag only when it is missing.", "工具会把固定目标标签写入 XMP dc:subject / rdf:Bag 的 rdf:li 值中，保留现有值，只追加缺失的目标标签。")}</p></details><details open><summary>{t("Will tagging change image quality, dimensions, or visible pixels?", "写入标签会改变画质、尺寸或图片像素吗？")}</summary><p>{t("No. JPG and PNG pixels are not decoded or re-encoded. The tool changes only the XMP metadata packet, so it does not add a visible label, watermark, or text to the image.", "不会。JPG 和 PNG 像素不会被解码或重新编码；工具只修改 XMP 元数据包，不会在画面中添加可见标签、水印或文字。")}</p></details><details open><summary>{t("How do I know the downloaded file was written correctly?", "如何确认下载后的文件已正确写入？")}</summary><p>{t("After writing, the tool reads the generated bytes again and marks a file “Verified” only when the requested XMP value is found. You can also add the downloaded JPG or PNG back to this page for another local check.", "写入后，工具会重新读取生成文件的字节；只有找到所需 XMP 值时才标记为“已验证”。也可以把下载后的 JPG 或 PNG 重新添加到本页，再做一次本地检查。")}</p></details><details open><summary>{t("Can I use this on Windows for product and A+ images?", "Windows 上的商品图和 A+ 图片可以使用吗？")}</summary><p>{t("Yes. Select final JPG or PNG files from Windows, including product and A+ images. Complete any crop, compression, or image editing first, then process the final exported files here.", "可以。在 Windows 上选择最终导出的 JPG 或 PNG，包括商品图和 A+ 内容图片。请先完成裁剪、压缩和修图，再在此处理最终导出文件。")}</p></details><details open><summary>{t("Why is my file unavailable for processing?", "为什么我的文件无法处理？")}</summary><p>{t("This version deliberately supports only JPG and PNG XMP structures that it can write and verify in the browser. Unsupported, protected, or unreadable files are placed in a collapsed notice list and are not included in the write flow.", "当前版本只支持能在浏览器中安全写入并验证 XMP 的 JPG 和 PNG 结构。不支持、受保护或无法读取的文件会放入可收起的提示列表，不会进入写入流程。")}</p></details><details open><summary>{t("Do older uploaded images need to be updated?", "此前已上传的图片需要补写标签吗？")}</summary><p>{t("Amazon's public announcement focuses on compliance for new uploads. For existing media, review the current Seller Central guidance when you edit or re-upload a listing; this tool does not determine policy obligations for older assets.", "Amazon 的公开公告重点说明新上传内容的合规要求。对于既有媒体，请在编辑或重新上传 Listing 时查看最新 Seller Central 指引；本工具不会判断旧素材的政策义务。")}</p></details></section>
     <section id="sources" className="sources"><p className="eyebrow">{t("SOURCES", "来源")}</p><h2>{t("Policy and technical references", "规则与技术参考")}</h2><ul><li><a href="https://sellercentral.amazon.com/seller-forums/discussions/t/aa0aee06-aff4-497a-a4b6-9b2ebe06f715" target="_blank" rel="noreferrer">Amazon Seller Forums — disclosure announcement</a><span>{t("Official disclosure scope and workflow.", "官方披露范围与流程说明。")}</span></li><li><a href="https://sellercentral.amazon.fr/help/hub/reference/external/GFXHCHYZRGJRBZA5?locale=fr-FR" target="_blank" rel="noreferrer">Amazon Seller Central — technical instructions</a><span>{t("Public help-page mirror describing the XMP structure.", "说明 XMP 结构的公开帮助页镜像。")}</span></li><li><a href="https://www.adobe.com/devnet/xmp.html" target="_blank" rel="noreferrer">Adobe — Extensible Metadata Platform</a><span>{t("XMP technical reference.", "XMP 技术参考。")}</span></li></ul></section>
     {showBackToTop && <a className="back-to-top" href="#top" onClick={(event) => { event.preventDefault(); setShowBackToTop(false); window.scrollTo({ top: 0, behavior: "smooth" }); }} aria-label={t("Back to top", "返回顶部")} title={t("Back to top", "返回顶部")}>↑</a>}{toast && <div className="toast" role="status"><span>✓</span>{toast}<button onClick={() => setToast(undefined)} aria-label="Dismiss notification">×</button></div>}<script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData }} />
   </main>;
