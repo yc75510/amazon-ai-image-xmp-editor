@@ -3,12 +3,12 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://example.github.io/amazon-ai-image-xmp-editor/"),
-  title: "亚马逊 AI 图片合规标记工具 - 批量写入 contains-synthetic-performer",
-  description: "给 Amazon 卖家使用的本地 XMP 标记工具：可批量检测或写入 contains-synthetic-performer，支持 JPG/PNG 商品图和 A+ 内容图片。文件不上传，写入后可验证并下载。",
+  title: "Amazon AI Image Tagger | 为 Amazon AI 人物图片写入合规标签",
+  description: "Amazon AI Image Tagger：面向 Amazon 卖家的本地 XMP 工具，为适用的 JPG/PNG 商品图和 A+ 内容图片写入并验证 contains-synthetic-performer。文件不上传，图片像素不会重新编码。",
   keywords: ["contains-synthetic-performer", "亚马逊AI图片标记", "Amazon AI image tag", "Amazon XMP", "dc:subject", "AI生成的人物"],
   alternates: { canonical: "/" },
-  openGraph: { title: "亚马逊 AI 图片合规标记工具", description: "批量检测或写入 contains-synthetic-performer XMP 标记。仅在浏览器本地处理 JPG/PNG 图片。", images: ["/og.png"], type: "website", locale: "zh_CN" },
-  twitter: { card: "summary_large_image", title: "亚马逊 AI 图片合规标记工具", description: "批量检测或写入 contains-synthetic-performer XMP 标记。仅在浏览器本地处理 JPG/PNG 图片。", images: ["/og.png"] },
+  openGraph: { title: "Amazon AI Image Tagger", description: "在浏览器本地处理适用 JPG/PNG 的 contains-synthetic-performer XMP 标签；像素不会重新编码。", images: ["/og.png"], type: "website", locale: "zh_CN" },
+  twitter: { card: "summary_large_image", title: "Amazon AI Image Tagger", description: "在浏览器本地处理并验证 contains-synthetic-performer XMP 标签。", images: ["/og.png"] },
   robots: { index: true, follow: true },
 };
 
